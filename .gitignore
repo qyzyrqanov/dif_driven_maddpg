@@ -2,3 +2,11 @@
 /MARLLIB/
 /gym/
 /gym-0.20.0/
+
+# Results and artifacts
+*.csv
+*.png
+*.pdf
+
+# AI assistant context bundle
+.ai/
