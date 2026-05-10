@@ -11,8 +11,8 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 
 scale=[
-            1.0,      # progressive
-            1.0,      # distance
+            0.0,      # progressive
+            0.0,      # distance
             0.0,      # base
             10.0,   # reached goal
             10.0,    # agent collision
