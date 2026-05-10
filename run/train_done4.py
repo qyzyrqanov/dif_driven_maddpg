@@ -14,33 +14,32 @@ scale=[
             1.0,      # progressive
             1.0,      # distance
             0.0,      # base
-            1000,   # reached goal
-            200.0,    # agent collision
-            200.0,    # obstacle collision
-            1,      # v_lin
-            1.,      # v_ang
-            1.       # time
+            10.0,   # reached goal
+            10.0,    # agent collision
+            10.0,    # obstacle collision
+            1.0,      # v_lin
+            1.0,      # v_ang
+            1.0       # time
         ]
 
-env=DiffDriveParallelEnvAssignFirstDone(
+env=DiffDriveParallelEnvDone(
     v_ang_max=torch.pi/2,
-    num_agents=6,
+    num_agents=4,
     num_obstacles=0
-
-
 )
+
 maddpg=IDDPGWithoutS(
     env,
     reward_scales=scale,
     batch_size=128,
-    replay_buffer_size=5000,
+    replay_buffer_size=50000,
 )
 
 maddpg.train_loop(
-    start_training_after=100,
-    train_each=50,
+    start_training_after=500,
+    train_each=100,
     patience=256,
-    min_episodes_before_early_stop=2000,
+    min_episodes_before_early_stop=10000,
     score_avg_window=256,
     max_steps=500
 )

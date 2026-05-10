@@ -664,7 +664,7 @@ class MADDPGBase(ABC):
         plt.close()
 
     def plot_episode_new_trajectory(self, episode):
-        trajectory, _ = self.try_actor()
+        trajectory, _, _, _ = self.try_actor()
         self.plot_episode_gone_trajectory(np.stack(trajectory), episode)
     def save_actor(self, file_name:str = 'simple_actor.pth'):
         pass
