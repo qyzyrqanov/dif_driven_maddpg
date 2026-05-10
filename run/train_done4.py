@@ -41,5 +41,6 @@ maddpg.train_loop(
     patience=256,
     min_episodes_before_early_stop=10000,
     score_avg_window=256,
-    max_steps=500
+    max_steps=500,
+    meta_extra={"seed": seed, "mode": "full"},
 )

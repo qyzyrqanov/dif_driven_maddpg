@@ -10,3 +10,9 @@
 
 # AI assistant context bundle
 .ai/
+/experiments/__init__.py
+/webots_world/worlds/.diff_driven_rl.wbproj
+/experiments0/__init__.py
+/experiments13/__init__.py
+/experiments41/__init__.py
+/experiments9832/__init__.py

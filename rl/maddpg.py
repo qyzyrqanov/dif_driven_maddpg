@@ -1,4 +1,7 @@
 import time
+import json
+import socket
+import platform
 
 import torch
 from pettingzoo import ParallelEnv
@@ -681,6 +684,8 @@ class MADDPGBase(ABC):
             start_training_after=start_training_after,
             rescale_env_rewards=None,
             min_episodes_before_early_stop:int=min_episodes_before_early_stop,
+            meta_extra: Optional[dict] = None,
+            meta_path: str = "meta.json",
     ) -> None:
         """
         Resumable training loop with checkpointing.
@@ -690,6 +695,10 @@ class MADDPGBase(ABC):
             train_each (int): Frequency to trigger learning.
             evaluate (bool): If True, only evaluates.
             checkpoint_path (str): Path to save/load training state.
+            meta_extra (dict, optional): Static info merged into ``meta.json``
+                (e.g. ``{"seed": 9832, "mode": "full"}``). Useful for the
+                compute-cost / reproducibility table.
+            meta_path (str): Path of the human-readable JSON metadata file.
         """
 
         # === Load previous training state if exists ===
@@ -704,9 +713,14 @@ class MADDPGBase(ABC):
             total_steps = state_dict['total_steps']
             self.actor_losses=state_dict['actor_losses']
             self.critic_losses=state_dict['critic_losses']
+            # Compute-cost accumulators (safe defaults for older pickles).
+            total_train_seconds = float(state_dict.get('total_train_seconds', 0.0))
+            peak_gpu_bytes = int(state_dict.get('peak_gpu_bytes', 0))
             self.load_checkpoint()
 
-            print(f"Resuming from episode {start_episode}")
+            print(f"Resuming from episode {start_episode} "
+                  f"(prior train time: {total_train_seconds/3600:.2f} h, "
+                  f"peak GPU: {peak_gpu_bytes/1e9:.2f} GB)")
         else:
             start_episode = 0
             self.score_history = []
@@ -715,10 +729,20 @@ class MADDPGBase(ABC):
             total_steps = 0
             self.actor_losses=[]
             self.critic_losses=[]
+            total_train_seconds = 0.0
+            peak_gpu_bytes = 0
 
+        # Reset within-session peak so torch.cuda.max_memory_allocated() reflects
+        # this process; we max() it against the persisted all-time peak below.
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
 
         for i in range(start_episode, n_games):
 
+            episode_start_time = time.perf_counter()
 
             state, obs = self.env.reset_tensor()
             done = torch.full((self.env.num_agents,), False, dtype=torch.bool, device=self.device)
@@ -761,6 +785,19 @@ class MADDPGBase(ABC):
                 episode_trajectory.append(self.env.agent_pos.cpu().clone().detach().numpy())
                 self.log_env_step_to_csv(total_step=total_steps, episode_id=i)
                 j=j+1
+            # Episode completed (loop exited normally — not interrupted).
+            # Accumulate ONLY succeeded episodes so the running total survives
+            # restarts faithfully; a Ctrl-C mid-episode discards that episode's
+            # time, which is intentional.
+            episode_duration = time.perf_counter() - episode_start_time
+            total_train_seconds += episode_duration
+            if torch.cuda.is_available():
+                try:
+                    peak_gpu_bytes = max(
+                        peak_gpu_bytes, int(torch.cuda.max_memory_allocated())
+                    )
+                except Exception:
+                    pass
             scores = self.reward_from_rb(self.env.current_score)
             score = scores.mean().cpu().item()
             self.score_history.append(score)
@@ -791,7 +828,9 @@ class MADDPGBase(ABC):
                 'episodes_without_improvement': episodes_without_improvement,
                     'total_steps':total_steps,
                     'actor_losses':self.actor_losses,
-                    'critic_losses':self.critic_losses
+                    'critic_losses':self.critic_losses,
+                    'total_train_seconds': total_train_seconds,
+                    'peak_gpu_bytes': peak_gpu_bytes,
 
 
                 }
@@ -802,6 +841,17 @@ class MADDPGBase(ABC):
                 self.replay_buffer.save("replay_buffer.pkl")
 
                 self.save_checkpoint()
+
+                self._save_meta_json(
+                    meta_path=meta_path,
+                    meta_extra=meta_extra,
+                    n_games_target=n_games,
+                    episodes_completed=i + 1,
+                    total_steps=total_steps,
+                    total_train_seconds=total_train_seconds,
+                    peak_gpu_bytes=peak_gpu_bytes,
+                    finished=False,
+                )
 
                 self.plot_learning_curve()
                 self.plot_actor_loss()
@@ -831,7 +881,9 @@ class MADDPGBase(ABC):
                     'episodes_without_improvement': episodes_without_improvement,
                     'total_steps': total_steps,
                     'actor_losses': self.actor_losses,
-                    'critic_losses': self.critic_losses
+                    'critic_losses': self.critic_losses,
+                    'total_train_seconds': total_train_seconds,
+                    'peak_gpu_bytes': peak_gpu_bytes,
 
                 }
                 with open(checkpoint_path, "wb") as f:
@@ -839,6 +891,16 @@ class MADDPGBase(ABC):
 
                 self.replay_buffer.save("replay_buffer.pkl")
                 self.save_checkpoint()
+                self._save_meta_json(
+                    meta_path=meta_path,
+                    meta_extra=meta_extra,
+                    n_games_target=n_games,
+                    episodes_completed=i + 1,
+                    total_steps=total_steps,
+                    total_train_seconds=total_train_seconds,
+                    peak_gpu_bytes=peak_gpu_bytes,
+                    finished=True,
+                )
                 print("Training progress saved.")
 
                 self.plot_learning_curve()
@@ -846,7 +908,75 @@ class MADDPGBase(ABC):
                 self.plot_critic_loss()
                 self.plot_episode_gone_trajectory(np.stack(episode_trajectory), episode=i)
                 break
+        else:
+            # Loop exited because the for-range completed all n_games. Mark finished.
+            self._save_meta_json(
+                meta_path=meta_path,
+                meta_extra=meta_extra,
+                n_games_target=n_games,
+                episodes_completed=n_games,
+                total_steps=total_steps,
+                total_train_seconds=total_train_seconds,
+                peak_gpu_bytes=peak_gpu_bytes,
+                finished=True,
+            )
         print("Training complete.")
+
+    def _save_meta_json(
+        self,
+        *,
+        meta_path: str,
+        meta_extra: Optional[dict],
+        n_games_target: int,
+        episodes_completed: int,
+        total_steps: int,
+        total_train_seconds: float,
+        peak_gpu_bytes: int,
+        finished: bool,
+    ) -> None:
+        """Persist training compute/reproducibility metadata to ``meta_path``.
+
+        ``total_train_seconds`` accumulates only over completed episodes, so it
+        survives interruption-and-resume: a crashed mid-episode does not get
+        counted, and the next launch picks up the running total from the
+        existing pickle.
+        """
+        meta = {
+            "num_agents": int(self.env.num_agents),
+            "reward_scales": [float(x) for x in self.reward_scales.tolist()],
+            "n_games_target": int(n_games_target),
+            "episodes_completed": int(episodes_completed),
+            "total_steps": int(total_steps),
+            "total_train_seconds": float(total_train_seconds),
+            "total_train_hours": float(total_train_seconds) / 3600.0,
+            "peak_gpu_bytes": int(peak_gpu_bytes),
+            "peak_gpu_gb": float(peak_gpu_bytes) / 1e9,
+            "hostname": socket.gethostname(),
+            "platform": platform.platform(),
+            "torch_version": torch.__version__,
+            "numpy_version": np.__version__,
+            "cuda_available": bool(torch.cuda.is_available()),
+            "device": str(self.device),
+            "batch_size": int(getattr(self.replay_buffer, "batch_size", 0)),
+            "replay_buffer_size": int(getattr(self.replay_buffer, "max_size", 0)),
+            "use_tagged_replay_buffer": bool(self.use_tagged_replay_buffer),
+            "finished": bool(finished),
+            "last_save_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        if torch.cuda.is_available():
+            try:
+                meta["gpu_name"] = torch.cuda.get_device_name(0)
+                meta["gpu_total_memory_gb"] = (
+                    torch.cuda.get_device_properties(0).total_memory / 1e9
+                )
+                meta["cuda_version"] = torch.version.cuda
+            except Exception:
+                pass
+        if meta_extra:
+            for k, v in meta_extra.items():
+                meta[k] = v
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
 
     def log_episode(self, episode_id, env=None):
         if env==None:
