@@ -8,7 +8,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,20 +30,23 @@ NEW_TRAIN_RUNS = [
 POLICY_EVAL_MODES = ["full", "ablation", "nocoll"]
 HEURISTIC_EVAL_SEEDS = [42, 100, 200]
 POLICY_EVAL_SEED = 42
+LOG_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
 class CommandTask:
     name: str
     cmd: list[str]
+    kind: str
     done_path: Path | None = None
-    required_path: Path | None = None
+    required_paths: tuple[Path, ...] = ()
     result_copy: tuple[Path, Path] | None = None
+    lock_path: Path | None = None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run all revision jobs sequentially with resume checks."
+        description="Run revision jobs with resume checks and bounded parallelism."
     )
     parser.add_argument(
         "--artifact_root",
@@ -65,6 +70,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval_episodes", type=int, default=200)
     parser.add_argument("--max_steps", type=int, default=500)
     parser.add_argument("--heuristic_kp", type=float, default=2.0)
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=3,
+        help=(
+            "Maximum number of independent subprocess tasks to run at once. "
+            "Use 1 while actively using the laptop; use 5 when the machine is free."
+        ),
+    )
     parser.add_argument(
         "--log_file",
         type=Path,
@@ -107,10 +121,101 @@ def env_for_subprocess() -> dict[str, str]:
 def log(message: str, log_file: Path) -> None:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     line = f"[{stamp}] {message}"
-    print(line, flush=True)
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    with log_file.open("a") as f:
-        f.write(line + "\n")
+    with LOG_LOCK:
+        print(line, flush=True)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a") as f:
+            f.write(line + "\n")
+
+
+def task_log_path(task: CommandTask, args: argparse.Namespace) -> Path:
+    safe = "".join(c if c.isalnum() else "_" for c in task.name).strip("_")
+    return args.artifact_root / "logs" / f"{safe}.log"
+
+
+def pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def acquire_task_lock(task: CommandTask, args: argparse.Namespace) -> bool:
+    if task.lock_path is None or args.dry_run:
+        return True
+
+    lock_path = task.lock_path
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if lock_path.exists():
+        try:
+            prior = json.loads(lock_path.read_text())
+            raw_pid = prior.get("pid")
+            if raw_pid is None:
+                raw_pid = prior.get("owner_pid")
+            prior_pid = int(raw_pid)
+        except Exception:
+            prior_pid = -1
+
+        if pid_is_running(prior_pid):
+            log(
+                f"SKIP running: {task.name} locked by pid={prior_pid} ({lock_path})",
+                args.log_file,
+            )
+            return False
+
+        log(f"Removing stale lock for {task.name}: {lock_path}", args.log_file)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        log(f"SKIP running: {task.name} lock appeared ({lock_path})", args.log_file)
+        return False
+
+    with os.fdopen(fd, "w") as f:
+        json.dump(
+            {
+                "pid": None,
+                "owner_pid": os.getpid(),
+                "task": task.name,
+                "started_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "cmd": task.cmd,
+            },
+            f,
+            indent=2,
+        )
+    return True
+
+
+def update_task_lock_pid(task: CommandTask, args: argparse.Namespace, pid: int) -> None:
+    if task.lock_path is None or args.dry_run:
+        return
+    payload = {
+        "pid": int(pid),
+        "owner_pid": os.getpid(),
+        "task": task.name,
+        "started_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "cmd": task.cmd,
+    }
+    task.lock_path.write_text(json.dumps(payload, indent=2))
+
+
+def release_task_lock(task: CommandTask, args: argparse.Namespace) -> None:
+    if task.lock_path is None or args.dry_run:
+        return
+    try:
+        task.lock_path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def run_dir(runs_dir: Path, n: int, mode: str, seed: int) -> Path:
@@ -126,6 +231,14 @@ def result_copy_path(res_dir: Path, n: int, mode: str, seed: int) -> Path:
     return res_dir / "revision_runs" / f"n{n}_{mode}_seed{seed}_{result_filename(n, mode)}"
 
 
+def is_generated_train_run(n: int, mode: str, seed: int) -> bool:
+    return (n, mode, seed) in set(NEW_TRAIN_RUNS)
+
+
+def train_done_path(runs_dir: Path, n: int, mode: str, seed: int) -> Path:
+    return run_dir(runs_dir, n, mode, seed) / result_filename(n, mode)
+
+
 def train_tasks(args: argparse.Namespace) -> list[CommandTask]:
     tasks = []
     for n, mode, seed in NEW_TRAIN_RUNS:
@@ -134,6 +247,7 @@ def train_tasks(args: argparse.Namespace) -> list[CommandTask]:
         tasks.append(
             CommandTask(
                 name=f"train n={n} mode={mode} seed={seed}",
+                kind="train",
                 cmd=[
                     PYTHON,
                     str(REPO_ROOT / "run" / "train_seeded.py"),
@@ -149,6 +263,7 @@ def train_tasks(args: argparse.Namespace) -> list[CommandTask]:
                     str(out_dir),
                 ],
                 done_path=result_csv,
+                lock_path=out_dir / ".run_all.lock",
                 result_copy=(
                     (result_csv, result_copy_path(args.res_dir, n, mode, seed))
                     if args.copy_large_csvs_to_res
@@ -173,12 +288,17 @@ def policy_eval_task(
     tag: str,
 ) -> CommandTask:
     actor_ckpt = actor_path(args.runs_dir, n, mode, train_seed)
+    required_paths = [actor_ckpt]
+    if is_generated_train_run(n, mode, train_seed):
+        required_paths.append(train_done_path(args.runs_dir, n, mode, train_seed))
+
     out_dir = args.runs_dir / "eval"
     env_tag = f"env{int(env_size)}" if float(env_size).is_integer() else f"env{env_size}"
     out_csv = out_dir / f"{tag}_n{n}_{mode}_trainseed{train_seed}_{env_tag}_evalseed{POLICY_EVAL_SEED}.csv"
     summary_json = out_csv.with_suffix(".json")
     return CommandTask(
         name=f"eval policy {tag} n={n} mode={mode} train_seed={train_seed} env_size={env_size}",
+        kind="eval",
         cmd=[
             PYTHON,
             str(REPO_ROOT / "run" / "eval_policy.py"),
@@ -202,7 +322,8 @@ def policy_eval_task(
             str(summary_json),
         ],
         done_path=summary_json,
-        required_path=actor_ckpt,
+        required_paths=tuple(required_paths),
+        lock_path=summary_json.with_suffix(".lock"),
         result_copy=(
             (out_csv, args.res_dir / "revision_evals" / out_csv.name)
             if args.copy_large_csvs_to_res
@@ -221,6 +342,7 @@ def heuristic_eval_tasks(args: argparse.Namespace) -> list[CommandTask]:
             tasks.append(
                 CommandTask(
                     name=f"eval heuristic n={n} seed={eval_seed}",
+                    kind="heuristic",
                     cmd=[
                         PYTHON,
                         str(REPO_ROOT / "run" / "eval_hungarian_p.py"),
@@ -244,6 +366,7 @@ def heuristic_eval_tasks(args: argparse.Namespace) -> list[CommandTask]:
                         str(summary_json),
                     ],
                     done_path=summary_json,
+                    lock_path=summary_json.with_suffix(".lock"),
                     result_copy=(
                         (out_csv, args.res_dir / "revision_evals" / out_csv.name)
                         if args.copy_large_csvs_to_res
@@ -292,6 +415,7 @@ def probe_task(args: argparse.Namespace) -> CommandTask:
     raw_csv = args.res_dir / "compute_repro_meta_raw.csv"
     return CommandTask(
         name="probe costs",
+        kind="probe",
         cmd=[
             PYTHON,
             str(REPO_ROOT / "tools" / "probe_costs.py"),
@@ -303,6 +427,7 @@ def probe_task(args: argparse.Namespace) -> CommandTask:
             str(raw_csv),
         ],
         done_path=out_csv,
+        lock_path=out_csv.with_suffix(".lock"),
     )
 
 
@@ -318,19 +443,56 @@ def copy_result(copy_pair: tuple[Path, Path] | None, log_file: Path) -> None:
     log(f"copied {source} -> {dest}", log_file)
 
 
+def task_is_done(task: CommandTask, args: argparse.Namespace) -> bool:
+    return (
+        task.done_path is not None
+        and task.done_path.exists()
+        and not args.rerun
+    )
+
+
+def missing_requirements(task: CommandTask) -> list[Path]:
+    return [path for path in task.required_paths if not path.exists()]
+
+
+def pick_ready_task_index(tasks: list[CommandTask], args: argparse.Namespace) -> int | None:
+    ready = [
+        index
+        for index, candidate in enumerate(tasks)
+        if task_is_done(candidate, args) or not missing_requirements(candidate)
+    ]
+    if not ready:
+        return None
+
+    # Finished/skipped tasks are cheap to account for, then ready evals should
+    # start before opening more training jobs so evaluation can overlap with
+    # remaining training as soon as a corresponding actor is final.
+    for index in ready:
+        if task_is_done(tasks[index], args):
+            return index
+    for index in ready:
+        if tasks[index].kind == "eval":
+            return index
+    return ready[0]
+
+
 def run_task(task: CommandTask, args: argparse.Namespace) -> str:
     log_file = args.log_file
-    if task.done_path is not None and task.done_path.exists() and not args.rerun:
+    if task_is_done(task, args):
         log(f"SKIP completed: {task.name} ({task.done_path})", log_file)
         copy_result(task.result_copy, log_file)
         return "skipped_done"
 
-    if task.required_path is not None and not task.required_path.exists():
-        message = f"SKIP missing requirement: {task.name} requires {task.required_path}"
+    missing = missing_requirements(task)
+    if missing:
+        message = f"SKIP missing requirement: {task.name} requires {missing[0]}"
         if args.strict_missing_eval_actor:
             raise FileNotFoundError(message)
         log(message, log_file)
         return "skipped_missing"
+
+    if not acquire_task_lock(task, args):
+        return "skipped_running"
 
     log(f"START {task.name}", log_file)
     log("CMD " + " ".join(task.cmd), log_file)
@@ -339,27 +501,103 @@ def run_task(task: CommandTask, args: argparse.Namespace) -> str:
         return "dry_run"
 
     start = time.time()
-    with log_file.open("a") as f:
-        f.write(f"\n===== {task.name} =====\n")
-        f.flush()
-        proc = subprocess.run(
-            task.cmd,
-            cwd=REPO_ROOT,
-            env=env_for_subprocess(),
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+    per_task_log = task_log_path(task, args)
+    per_task_log.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with per_task_log.open("a") as f:
+            f.write(f"\n===== {time.strftime('%Y-%m-%dT%H:%M:%S%z')} {task.name} =====\n")
+            f.write("CMD " + " ".join(task.cmd) + "\n")
+            f.flush()
+            proc = subprocess.Popen(
+                task.cmd,
+                cwd=REPO_ROOT,
+                env=env_for_subprocess(),
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            update_task_lock_pid(task, args, proc.pid)
+            returncode = proc.wait()
 
-    elapsed = time.time() - start
-    if proc.returncode != 0:
-        log(f"FAIL {task.name} rc={proc.returncode} elapsed_s={elapsed:.1f}", log_file)
-        raise subprocess.CalledProcessError(proc.returncode, task.cmd)
+        elapsed = time.time() - start
+        if returncode != 0:
+            log(
+                f"FAIL {task.name} rc={returncode} elapsed_s={elapsed:.1f} log={per_task_log}",
+                log_file,
+            )
+            raise subprocess.CalledProcessError(returncode, task.cmd)
 
-    log(f"DONE {task.name} elapsed_s={elapsed:.1f}", log_file)
-    copy_result(task.result_copy, log_file)
-    return "ran"
+        log(f"DONE {task.name} elapsed_s={elapsed:.1f} log={per_task_log}", log_file)
+        copy_result(task.result_copy, log_file)
+        return "ran"
+    finally:
+        release_task_lock(task, args)
+
+
+def run_tasks_dynamic(
+    tasks: list[CommandTask],
+    args: argparse.Namespace,
+    counts: dict[str, int],
+    group_name: str,
+) -> None:
+    if not tasks:
+        return
+
+    parallel = max(1, int(args.parallel))
+    pending_tasks = list(tasks)
+    completed = 0
+    log(f"Group {group_name}: {len(tasks)} tasks, parallel={parallel}", args.log_file)
+
+    with ThreadPoolExecutor(max_workers=parallel) as executor:
+        futures = {}
+
+        while pending_tasks or futures:
+            while pending_tasks and len(futures) < parallel:
+                ready_index = pick_ready_task_index(pending_tasks, args)
+                if ready_index is None:
+                    break
+
+                task = pending_tasks.pop(ready_index)
+                log(
+                    f"{group_name} submit {completed + len(futures) + 1}/{len(tasks)}: {task.name}",
+                    args.log_file,
+                )
+                futures[executor.submit(run_task, task, args)] = task
+
+            if futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    task = futures.pop(future)
+                    status = future.result()
+                    counts[status] = counts.get(status, 0) + 1
+                    completed += 1
+                    log(
+                        f"{group_name} completed {completed}/{len(tasks)}: {task.name} [{status}]",
+                        args.log_file,
+                    )
+                continue
+
+            # No internal work is running and every remaining task is waiting on
+            # requirements this invocation will not create. Skip those tasks now
+            # instead of spinning forever.
+            blocked = pending_tasks
+            pending_tasks = []
+            for task in blocked:
+                missing = missing_requirements(task)
+                if missing:
+                    message = f"SKIP missing requirement: {task.name} requires {missing[0]}"
+                    if args.strict_missing_eval_actor:
+                        raise FileNotFoundError(message)
+                    log(message, args.log_file)
+                    status = "skipped_missing"
+                else:
+                    status = run_task(task, args)
+                counts[status] = counts.get(status, 0) + 1
+                completed += 1
+                log(
+                    f"{group_name} completed {completed}/{len(tasks)}: {task.name} [{status}]",
+                    args.log_file,
+                )
 
 
 def write_summary(path: Path, counts: dict[str, int]) -> None:
@@ -370,6 +608,9 @@ def write_summary(path: Path, counts: dict[str, int]) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.parallel < 1:
+        raise ValueError("--parallel must be >= 1")
+
     args.artifact_root = args.artifact_root.expanduser().resolve()
     if args.runs_dir is None:
         args.runs_dir = args.artifact_root / "runs"
@@ -388,20 +629,29 @@ def main() -> None:
     if args.train_only and args.eval_only:
         raise ValueError("--train_only and --eval_only cannot be used together")
 
-    tasks: list[CommandTask] = []
-    if not args.eval_only:
-        tasks.extend(train_tasks(args))
-    if not args.train_only:
-        tasks.extend(eval_tasks(args))
-    if not args.skip_probe and not args.train_only:
-        tasks.append(probe_task(args))
+    train_phase_tasks = [] if args.eval_only else train_tasks(args)
+    eval_phase_tasks = [] if args.train_only else eval_tasks(args)
+    probe_phase_tasks = (
+        [] if args.skip_probe or args.train_only else [probe_task(args)]
+    )
 
-    log(f"Prepared {len(tasks)} tasks", args.log_file)
-    counts = {"ran": 0, "skipped_done": 0, "skipped_missing": 0, "dry_run": 0}
-    for index, task in enumerate(tasks, start=1):
-        log(f"Task {index}/{len(tasks)}", args.log_file)
-        status = run_task(task, args)
-        counts[status] = counts.get(status, 0) + 1
+    total_tasks = len(train_phase_tasks) + len(eval_phase_tasks) + len(probe_phase_tasks)
+    log(
+        f"Prepared {total_tasks} tasks "
+        f"(train={len(train_phase_tasks)}, eval={len(eval_phase_tasks)}, "
+        f"probe={len(probe_phase_tasks)}, parallel={args.parallel})",
+        args.log_file,
+    )
+    counts = {
+        "ran": 0,
+        "skipped_done": 0,
+        "skipped_missing": 0,
+        "skipped_running": 0,
+        "dry_run": 0,
+    }
+
+    run_tasks_dynamic(train_phase_tasks + eval_phase_tasks, args, counts, "train/eval")
+    run_tasks_dynamic(probe_phase_tasks, args, counts, "probe")
 
     summary_path = args.runs_dir / "run_all_summary.json"
     write_summary(summary_path, counts)
