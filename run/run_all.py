@@ -16,6 +16,15 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.offload_artifacts import (  # noqa: E402
+    DEFAULT_TARGET_ROOT,
+    ensure_target_root,
+    offload_run_dir,
+)
+
 PYTHON = sys.executable
 DEFAULT_ARTIFACT_ROOT = Path.home() / "Desktop" / "dif_driven_revision_artifacts"
 
@@ -42,6 +51,7 @@ class CommandTask:
     required_paths: tuple[Path, ...] = ()
     result_copy: tuple[Path, Path] | None = None
     lock_path: Path | None = None
+    cleanup_dir: Path | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +107,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_only", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--skip_probe", action="store_true")
+    parser.add_argument(
+        "--offload_root",
+        type=Path,
+        default=DEFAULT_TARGET_ROOT,
+        help=(
+            "External artifact mirror. After each completed training run, run_all "
+            "copies that run directory here, verifies file sizes, then prunes local "
+            "heavy files. If unavailable, it only logs a warning."
+        ),
+    )
+    parser.add_argument(
+        "--disable_offload",
+        action="store_true",
+        help="Disable automatic post-training offload/cleanup.",
+    )
+    parser.add_argument(
+        "--keep_local_result_csv",
+        action="store_true",
+        help=(
+            "Keep completed training result CSVs in the local artifact root after "
+            "offload. Default removes them to save space; run_all can still detect "
+            "the offloaded CSV."
+        ),
+    )
     parser.add_argument(
         "--rerun",
         action="store_true",
@@ -264,6 +298,7 @@ def train_tasks(args: argparse.Namespace) -> list[CommandTask]:
                 ],
                 done_path=result_csv,
                 lock_path=out_dir / ".run_all.lock",
+                cleanup_dir=out_dir,
                 result_copy=(
                     (result_csv, result_copy_path(args.res_dir, n, mode, seed))
                     if args.copy_large_csvs_to_res
@@ -443,23 +478,55 @@ def copy_result(copy_pair: tuple[Path, Path] | None, log_file: Path) -> None:
     log(f"copied {source} -> {dest}", log_file)
 
 
+def offloaded_equivalent(path: Path, args: argparse.Namespace) -> Path | None:
+    if args.disable_offload:
+        return None
+    try:
+        rel = path.resolve().relative_to(args.artifact_root)
+    except ValueError:
+        return None
+    return args.offload_root / rel
+
+
+def path_exists_local_or_offloaded(path: Path, args: argparse.Namespace) -> bool:
+    if path.exists():
+        return True
+    offloaded = offloaded_equivalent(path, args)
+    return bool(offloaded is not None and offloaded.exists())
+
+
+def requirement_exists(path: Path, args: argparse.Namespace) -> bool:
+    if path.exists():
+        return True
+    # Evaluation opens actor_ckpt from the local path in the subprocess command.
+    # Only scheduler-only completion markers, such as train result CSVs, can be
+    # satisfied from the external mirror.
+    if path.name == "shared_actor.pth":
+        return False
+    return path_exists_local_or_offloaded(path, args)
+
+
 def task_is_done(task: CommandTask, args: argparse.Namespace) -> bool:
     return (
         task.done_path is not None
-        and task.done_path.exists()
+        and path_exists_local_or_offloaded(task.done_path, args)
         and not args.rerun
     )
 
 
-def missing_requirements(task: CommandTask) -> list[Path]:
-    return [path for path in task.required_paths if not path.exists()]
+def missing_requirements_for_task(task: CommandTask, args: argparse.Namespace) -> list[Path]:
+    return [
+        path
+        for path in task.required_paths
+        if not requirement_exists(path, args)
+    ]
 
 
 def pick_ready_task_index(tasks: list[CommandTask], args: argparse.Namespace) -> int | None:
     ready = [
         index
         for index, candidate in enumerate(tasks)
-        if task_is_done(candidate, args) or not missing_requirements(candidate)
+        if task_is_done(candidate, args) or not missing_requirements_for_task(candidate, args)
     ]
     if not ready:
         return None
@@ -481,9 +548,10 @@ def run_task(task: CommandTask, args: argparse.Namespace) -> str:
     if task_is_done(task, args):
         log(f"SKIP completed: {task.name} ({task.done_path})", log_file)
         copy_result(task.result_copy, log_file)
+        offload_finished_task(task, args)
         return "skipped_done"
 
-    missing = missing_requirements(task)
+    missing = missing_requirements_for_task(task, args)
     if missing:
         message = f"SKIP missing requirement: {task.name} requires {missing[0]}"
         if args.strict_missing_eval_actor:
@@ -529,9 +597,37 @@ def run_task(task: CommandTask, args: argparse.Namespace) -> str:
 
         log(f"DONE {task.name} elapsed_s={elapsed:.1f} log={per_task_log}", log_file)
         copy_result(task.result_copy, log_file)
+        offload_finished_task(task, args)
         return "ran"
     finally:
         release_task_lock(task, args)
+
+
+def offload_finished_task(task: CommandTask, args: argparse.Namespace) -> None:
+    if args.disable_offload or task.kind != "train" or task.cleanup_dir is None:
+        return
+    target_root = ensure_target_root(args.offload_root, dry_run=args.dry_run)
+    if target_root is None:
+        log(f"OFFLOAD unavailable, target missing: {args.offload_root}", args.log_file)
+        return
+    try:
+        result = offload_run_dir(
+            task.cleanup_dir,
+            source_root=args.artifact_root,
+            target_root=target_root,
+            keep_local_result_csv=args.keep_local_result_csv,
+            dry_run=args.dry_run,
+        )
+    except Exception as exc:
+        log(f"OFFLOAD failed for {task.cleanup_dir}: {exc!r}", args.log_file)
+        return
+    detail = (
+        f"status={result.status} copied={result.copied_files} "
+        f"removed={result.removed_files} freed_bytes={result.freed_bytes}"
+    )
+    if result.message:
+        detail += f" message={result.message}"
+    log(f"OFFLOAD {task.name}: {detail}", args.log_file)
 
 
 def run_tasks_dynamic(
@@ -583,7 +679,7 @@ def run_tasks_dynamic(
             blocked = pending_tasks
             pending_tasks = []
             for task in blocked:
-                missing = missing_requirements(task)
+                missing = missing_requirements_for_task(task, args)
                 if missing:
                     message = f"SKIP missing requirement: {task.name} requires {missing[0]}"
                     if args.strict_missing_eval_actor:
@@ -622,6 +718,9 @@ def main() -> None:
     args.runs_dir = args.runs_dir.resolve()
     args.res_dir = args.res_dir.resolve()
     args.log_file = args.log_file.resolve()
+    args.offload_root = args.offload_root.expanduser()
+    if args.offload_root.exists():
+        args.offload_root = args.offload_root.resolve()
 
     args.runs_dir.mkdir(parents=True, exist_ok=True)
     args.res_dir.mkdir(parents=True, exist_ok=True)
