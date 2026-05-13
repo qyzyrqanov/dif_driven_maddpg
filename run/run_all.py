@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -140,6 +141,14 @@ def parse_args() -> argparse.Namespace:
         "--strict_missing_eval_actor",
         action="store_true",
         help="Fail if an eval actor checkpoint is missing instead of logging a skip.",
+    )
+    parser.add_argument(
+        "--check_completeness",
+        action="store_true",
+        help=(
+            "Write a train/eval completeness report and exit without launching "
+            "subprocess tasks."
+        ),
     )
     return parser.parse_args()
 
@@ -495,7 +504,109 @@ def path_exists_local_or_offloaded(path: Path, args: argparse.Namespace) -> bool
     return bool(offloaded is not None and offloaded.exists())
 
 
+def first_existing_local_or_offloaded(path: Path, args: argparse.Namespace) -> Path | None:
+    if path.exists():
+        return path
+    offloaded = offloaded_equivalent(path, args)
+    if offloaded is not None and offloaded.exists():
+        return offloaded
+    return None
+
+
+def is_training_result_path(path: Path) -> bool:
+    return path.parent.name.startswith("n") and path.name.startswith("result") and path.suffix == ".csv"
+
+
+def training_meta_is_finished(run_path: Path, args: argparse.Namespace) -> bool:
+    candidates = [run_path / "meta.json"]
+    offloaded = offloaded_equivalent(run_path / "meta.json", args)
+    if offloaded is not None:
+        candidates.append(offloaded)
+
+    for meta_path in candidates:
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        episodes_completed = int(meta.get("episodes_completed") or 0)
+        requested = int(meta.get("episodes_requested") or meta.get("n_games_target") or args.episodes)
+        finished = bool(meta.get("finished")) or meta.get("launcher_status") == "finished"
+        if finished and episodes_completed >= requested:
+            return True
+    return False
+
+
+def read_training_meta(run_path: Path, args: argparse.Namespace) -> dict:
+    candidates = [run_path / "meta.json"]
+    offloaded = offloaded_equivalent(run_path / "meta.json", args)
+    if offloaded is not None:
+        candidates.append(offloaded)
+    for meta_path in candidates:
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        meta["_meta_path"] = str(meta_path)
+        return meta
+    return {}
+
+
+def csv_data_rows(path: Path) -> int | None:
+    try:
+        with path.open(newline="") as f:
+            return max(sum(1 for _ in f) - 1, 0)
+    except FileNotFoundError:
+        return None
+
+
+def task_arg_value(task: CommandTask, flag: str) -> str | None:
+    try:
+        index = task.cmd.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(task.cmd):
+        return None
+    return task.cmd[index + 1]
+
+
+def eval_task_is_complete(task: CommandTask, args: argparse.Namespace) -> bool:
+    if task.done_path is None:
+        return False
+    summary_path = first_existing_local_or_offloaded(task.done_path, args)
+    if summary_path is None:
+        return False
+
+    expected_episodes = int(task_arg_value(task, "--episodes") or args.eval_episodes)
+    try:
+        summary = json.loads(summary_path.read_text())
+    except Exception:
+        summary = {}
+    if int(summary.get("episodes") or 0) < expected_episodes:
+        return False
+
+    out_csv_arg = task_arg_value(task, "--out_csv")
+    if out_csv_arg:
+        out_csv = first_existing_local_or_offloaded(Path(out_csv_arg), args)
+        if out_csv is None:
+            return False
+        rows = csv_data_rows(out_csv)
+        if rows is None or rows < expected_episodes:
+            return False
+
+    if task.required_paths:
+        actor = task.required_paths[0]
+        if actor.name == "shared_actor.pth" and actor.exists() and summary_path.exists():
+            return summary_path.stat().st_mtime >= actor.stat().st_mtime
+    return True
+
+
 def requirement_exists(path: Path, args: argparse.Namespace) -> bool:
+    if is_training_result_path(path):
+        return training_meta_is_finished(path.parent, args)
     if path.exists():
         return True
     # Evaluation opens actor_ckpt from the local path in the subprocess command.
@@ -507,6 +618,14 @@ def requirement_exists(path: Path, args: argparse.Namespace) -> bool:
 
 
 def task_is_done(task: CommandTask, args: argparse.Namespace) -> bool:
+    if task.kind == "train" and task.cleanup_dir is not None:
+        return (
+            task.done_path is not None
+            and training_meta_is_finished(task.cleanup_dir, args)
+            and not args.rerun
+        )
+    if task.kind == "eval" and task.done_path is not None and not args.rerun:
+        return eval_task_is_complete(task, args)
     return (
         task.done_path is not None
         and path_exists_local_or_offloaded(task.done_path, args)
@@ -617,6 +736,7 @@ def offload_finished_task(task: CommandTask, args: argparse.Namespace) -> None:
             target_root=target_root,
             keep_local_result_csv=args.keep_local_result_csv,
             dry_run=args.dry_run,
+            progress=False,
         )
     except Exception as exc:
         log(f"OFFLOAD failed for {task.cleanup_dir}: {exc!r}", args.log_file)
@@ -702,6 +822,114 @@ def write_summary(path: Path, counts: dict[str, int]) -> None:
         json.dump({"counts": counts, "finished_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, f, indent=2)
 
 
+def task_status(task: CommandTask, args: argparse.Namespace) -> str:
+    if task_is_done(task, args):
+        return "complete"
+    missing = missing_requirements_for_task(task, args)
+    if missing:
+        return "blocked_missing_requirement"
+    return "pending"
+
+
+def completeness_rows(tasks: list[CommandTask], args: argparse.Namespace) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for task in tasks:
+        status = task_status(task, args)
+        row: dict[str, object] = {
+            "task": task.name,
+            "kind": task.kind,
+            "status": status,
+            "done_path": str(task.done_path or ""),
+            "missing_requirement": "",
+        }
+        missing = missing_requirements_for_task(task, args)
+        if missing:
+            row["missing_requirement"] = str(missing[0])
+
+        if task.kind == "train" and task.cleanup_dir is not None:
+            meta = read_training_meta(task.cleanup_dir, args)
+            requested = int(meta.get("episodes_requested") or meta.get("n_games_target") or args.episodes)
+            completed = int(meta.get("episodes_completed") or 0)
+            row.update(
+                {
+                    "n": meta.get("n", ""),
+                    "mode": meta.get("mode", ""),
+                    "seed": meta.get("seed", ""),
+                    "episodes_completed": completed,
+                    "episodes_expected": requested,
+                    "finished": bool(meta.get("finished")),
+                    "launcher_status": meta.get("launcher_status", ""),
+                    "meta_path": meta.get("_meta_path", ""),
+                }
+            )
+        elif task.kind in {"eval", "heuristic"}:
+            expected = int(task_arg_value(task, "--episodes") or args.eval_episodes)
+            summary_path = first_existing_local_or_offloaded(task.done_path, args) if task.done_path else None
+            out_csv_arg = task_arg_value(task, "--out_csv")
+            out_csv = first_existing_local_or_offloaded(Path(out_csv_arg), args) if out_csv_arg else None
+            summary = {}
+            if summary_path is not None:
+                try:
+                    summary = json.loads(summary_path.read_text())
+                except Exception:
+                    summary = {}
+            row.update(
+                {
+                    "n": task_arg_value(task, "--n") or "",
+                    "mode": task_arg_value(task, "--mode") or "",
+                    "seed": task_arg_value(task, "--seed") or "",
+                    "episodes_completed": summary.get("episodes", csv_data_rows(out_csv) if out_csv else 0),
+                    "episodes_expected": expected,
+                    "summary_path": str(summary_path or ""),
+                    "episode_csv": str(out_csv or ""),
+                    "episode_csv_rows": csv_data_rows(out_csv) if out_csv else "",
+                }
+            )
+        rows.append(row)
+    return rows
+
+
+def write_completeness_report(tasks: list[CommandTask], args: argparse.Namespace) -> dict[str, object]:
+    rows = completeness_rows(tasks, args)
+    report_dir = args.runs_dir
+    report_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = report_dir / "run_all_completeness.csv"
+    json_path = report_dir / "run_all_completeness.json"
+
+    fieldnames = sorted({key for row in rows for key in row})
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    summary = {
+        "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "total": len(rows),
+        "complete": sum(1 for row in rows if row["status"] == "complete"),
+        "pending": sum(1 for row in rows if row["status"] == "pending"),
+        "blocked_missing_requirement": sum(
+            1 for row in rows if row["status"] == "blocked_missing_requirement"
+        ),
+        "csv": str(csv_path),
+        "incomplete_tasks": [
+            row
+            for row in rows
+            if row["status"] != "complete"
+        ],
+    }
+    with json_path.open("w") as f:
+        json.dump(summary, f, indent=2)
+    log(
+        "Completeness: "
+        f"complete={summary['complete']}/{summary['total']} "
+        f"pending={summary['pending']} "
+        f"blocked={summary['blocked_missing_requirement']} "
+        f"report={csv_path}",
+        args.log_file,
+    )
+    return summary
+
+
 def main() -> None:
     args = parse_args()
     if args.parallel < 1:
@@ -749,8 +977,14 @@ def main() -> None:
         "dry_run": 0,
     }
 
+    all_phase_tasks = train_phase_tasks + eval_phase_tasks + probe_phase_tasks
+    write_completeness_report(all_phase_tasks, args)
+    if args.check_completeness:
+        return
+
     run_tasks_dynamic(train_phase_tasks + eval_phase_tasks, args, counts, "train/eval")
     run_tasks_dynamic(probe_phase_tasks, args, counts, "probe")
+    write_completeness_report(all_phase_tasks, args)
 
     summary_path = args.runs_dir / "run_all_summary.json"
     write_summary(summary_path, counts)
