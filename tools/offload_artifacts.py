@@ -55,6 +55,48 @@ class OffloadResult:
     message: str = ""
 
 
+@dataclass
+class Progress:
+    label: str
+    total_files: int
+    total_bytes: int
+    enabled: bool = True
+    interval_seconds: float = 1.0
+
+    def __post_init__(self) -> None:
+        self.done_files = 0
+        self.done_bytes = 0
+        self.start_time = time.time()
+        self.last_emit = 0.0
+
+    def update(self, *, files: int = 0, bytes_count: int = 0, force: bool = False) -> None:
+        self.done_files += files
+        self.done_bytes += bytes_count
+        if not self.enabled:
+            return
+        now = time.time()
+        if not force and now - self.last_emit < self.interval_seconds:
+            return
+        self.last_emit = now
+
+        file_pct = 100.0 if self.total_files == 0 else self.done_files * 100.0 / self.total_files
+        byte_pct = 100.0 if self.total_bytes == 0 else self.done_bytes * 100.0 / self.total_bytes
+        elapsed = max(now - self.start_time, 1e-6)
+        rate_mb_s = self.done_bytes / 1e6 / elapsed
+        line = (
+            f"\r{self.label}: {self.done_files}/{self.total_files} files "
+            f"({file_pct:5.1f}%), {self.done_bytes/1e6:.1f}/{self.total_bytes/1e6:.1f} MB "
+            f"({byte_pct:5.1f}%), {rate_mb_s:.1f} MB/s"
+        )
+        print(line, end="", flush=True)
+
+    def finish(self) -> None:
+        if not self.enabled:
+            return
+        self.update(force=True)
+        print("", flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -107,6 +149,11 @@ def parse_args() -> argparse.Namespace:
         "--dry_run",
         action="store_true",
         help="Show intended copy/prune actions without writing or deleting.",
+    )
+    parser.add_argument(
+        "--quiet_progress",
+        action="store_true",
+        help="Disable progress lines and print only timestamped summary logs.",
     )
     return parser.parse_args()
 
@@ -186,22 +233,53 @@ def iter_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*") if path.is_file())
 
 
-def copy_tree_verified(source: Path, target: Path, *, dry_run: bool) -> int:
+def total_size(paths: list[Path]) -> int:
+    total = 0
+    for path in paths:
+        try:
+            total += path.stat().st_size
+        except FileNotFoundError:
+            continue
+    return total
+
+
+def copy_tree_verified(
+    source: Path,
+    target: Path,
+    *,
+    dry_run: bool,
+    progress: bool,
+) -> int:
+    files = iter_files(source)
+    progress_bar = Progress(
+        label=f"copy {source.name}",
+        total_files=len(files),
+        total_bytes=total_size(files),
+        enabled=progress and not dry_run,
+    )
     copied = 0
-    for src_file in iter_files(source):
+    for src_file in files:
         rel = src_file.relative_to(source)
         dst_file = target / rel
+        try:
+            src_size = src_file.stat().st_size
+        except FileNotFoundError:
+            progress_bar.update(files=1)
+            continue
         copied += 1
         if dry_run:
             log(f"DRY copy {src_file} -> {dst_file}")
+            progress_bar.update(files=1, bytes_count=src_size)
             continue
 
         dst_file.parent.mkdir(parents=True, exist_ok=True)
-        if not dst_file.exists() or dst_file.stat().st_size != src_file.stat().st_size:
+        if not dst_file.exists() or dst_file.stat().st_size != src_size:
             shutil.copy2(src_file, dst_file)
 
-        if dst_file.stat().st_size != src_file.stat().st_size:
+        if dst_file.stat().st_size != src_size:
             raise IOError(f"copy verification failed: {src_file} -> {dst_file}")
+        progress_bar.update(files=1, bytes_count=src_size)
+    progress_bar.finish()
     return copied
 
 
@@ -255,10 +333,14 @@ def prune_run_dir(
     keep_local_result_csv: bool,
     prune_incomplete_snapshots: bool,
     dry_run: bool,
+    progress: bool,
 ) -> tuple[int, int]:
     removed = 0
     freed = 0
-    for path in iter_files(run_dir):
+    files = iter_files(run_dir)
+    candidate_files = []
+    candidate_bytes = 0
+    for path in files:
         if completed:
             keep = should_keep_completed(
                 path, run_dir, keep_local_result_csv=keep_local_result_csv
@@ -269,18 +351,37 @@ def prune_run_dir(
             )
         if keep:
             continue
+        candidate_files.append(path)
+        try:
+            candidate_bytes += path.stat().st_size
+        except FileNotFoundError:
+            pass
 
+    progress_bar = Progress(
+        label=f"prune {run_dir.name}",
+        total_files=len(candidate_files),
+        total_bytes=candidate_bytes,
+        enabled=progress,
+    )
+    for path in candidate_files:
         if not file_is_stable(path):
             log(f"skip changing file {path}")
+            progress_bar.update(files=1)
             continue
 
-        size = path.stat().st_size
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            progress_bar.update(files=1)
+            continue
         removed += 1
         freed += size
         if dry_run:
             log(f"DRY remove {path} ({size} bytes)")
         else:
             path.unlink()
+        progress_bar.update(files=1, bytes_count=size)
+    progress_bar.finish()
 
     if not dry_run:
         for directory in sorted(
@@ -328,6 +429,7 @@ def offload_run_dir(
     prune_incomplete_snapshots: bool = False,
     include_running: bool = False,
     dry_run: bool = False,
+    progress: bool = True,
 ) -> OffloadResult:
     run_dir = run_dir.expanduser().resolve()
     source_root = source_root.expanduser().resolve()
@@ -371,14 +473,17 @@ def offload_run_dir(
         rel = Path("runs") / run_dir.name
     target_run_dir = target_root / rel
 
-    copied = copy_tree_verified(run_dir, target_run_dir, dry_run=dry_run)
+    log(f"copy start: {run_dir} -> {target_run_dir}")
+    copied = copy_tree_verified(run_dir, target_run_dir, dry_run=dry_run, progress=progress)
     completed = False if locked else run_is_finished(run_dir, target_run_dir)
+    log(f"prune start: {run_dir} completed={completed} locked={locked}")
     removed, freed = prune_run_dir(
         run_dir,
         completed=completed,
         keep_local_result_csv=keep_local_result_csv,
         prune_incomplete_snapshots=prune_incomplete_snapshots,
         dry_run=dry_run,
+        progress=progress,
     )
     write_manifest(
         run_dir,
@@ -406,12 +511,19 @@ def offload_run_dir(
     )
 
 
-def copy_support_dir(source_root: Path, target_root: Path, name: str, *, dry_run: bool) -> None:
+def copy_support_dir(
+    source_root: Path,
+    target_root: Path,
+    name: str,
+    *,
+    dry_run: bool,
+    progress: bool,
+) -> None:
     source = source_root / name
     if not source.exists():
         return
     target = target_root / name
-    copied = copy_tree_verified(source, target, dry_run=dry_run)
+    copied = copy_tree_verified(source, target, dry_run=dry_run, progress=progress)
     log(f"support copied {name}: files={copied}")
 
 
@@ -431,10 +543,23 @@ def main() -> None:
     if available_target_root is None:
         raise SystemExit(f"Target root is not available: {args.target_root.expanduser()}")
     target_root = available_target_root
+    progress = not args.quiet_progress
 
     if args.copy_support_dirs:
-        copy_support_dir(source_root, target_root, "logs", dry_run=args.dry_run)
-        copy_support_dir(source_root, target_root, "res", dry_run=args.dry_run)
+        copy_support_dir(
+            source_root,
+            target_root,
+            "logs",
+            dry_run=args.dry_run,
+            progress=progress,
+        )
+        copy_support_dir(
+            source_root,
+            target_root,
+            "res",
+            dry_run=args.dry_run,
+            progress=progress,
+        )
 
     run_dirs = [path.expanduser() for path in args.run_dir]
     if args.all_runs or not run_dirs:
@@ -460,6 +585,7 @@ def main() -> None:
             prune_incomplete_snapshots=args.prune_incomplete_snapshots,
             include_running=args.include_running,
             dry_run=args.dry_run,
+            progress=progress,
         )
         statuses[result.status] = statuses.get(result.status, 0) + 1
         totals["copied_files"] += result.copied_files

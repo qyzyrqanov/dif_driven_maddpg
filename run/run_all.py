@@ -27,7 +27,7 @@ from tools.offload_artifacts import (  # noqa: E402
 )
 
 PYTHON = sys.executable
-DEFAULT_ARTIFACT_ROOT = Path.home() / "Desktop" / "dif_driven_revision_artifacts"
+DEFAULT_ARTIFACT_ROOT = Path("/media/abz/Z7S/experiments_revision_corrected")
 
 TRAIN_NS = [4, 5, 6]
 TRAIN_SEEDS = [9832, 0, 13]

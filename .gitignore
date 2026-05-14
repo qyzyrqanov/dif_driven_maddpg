@@ -1,18 +1,54 @@
+# Third-party / vendored packages (full source trees, not part of our code)
 /Multi-Agent-Deep-Deterministic-Policy-Gradients/
+/MARLlib/
 /MARLLIB/
 /gym/
 /gym-0.20.0/
+
+# Python compiled / cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+
+# Virtual environments
+.venv/
+.venvLin/
+.venv310/
+.venv3.10/
 
 # Results and artifacts
 *.csv
 *.png
 *.pdf
+*.zip
+*.pkl
 
-# AI assistant context bundle
+# Training artifacts (large binaries)
+*.pth
+
+# Experiment outputs (per-seed logs)
+experiments/
+experiments0/
+experiments13/
+experiments41/
+experiments9832/
+
+# Webots simulator integration (not part of canonical pipeline)
+webots_world/
+
+# AI assistant context bundle (local-only docs)
 .ai/
-/experiments/__init__.py
-/webots_world/worlds/.diff_driven_rl.wbproj
-/experiments0/__init__.py
-/experiments13/__init__.py
-/experiments41/__init__.py
-/experiments9832/__init__.py
+CLAUDE.md
+
+# Local backup / scratch files
+*_copy.py
+*.bak
+
+# Misc local utilities not part of canonical pipeline
+find_crop.py
+find_crops.sh
+plotter.ipynb

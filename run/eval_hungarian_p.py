@@ -46,8 +46,6 @@ def wrap_angle(angle: torch.Tensor) -> torch.Tensor:
 def hungarian_p_actions(env, kp: float) -> torch.Tensor:
     actions = torch.zeros((env.num_agents, env.action_dim), dtype=torch.float32, device=env.device)
     _, _, _, assigned_landmarks = env.get_hungarian_distances()
-    dv_lin_max = float(getattr(env, "dv_lin_max", env.v_lin_max / 4))
-    dv_ang_max = float(getattr(env, "dv_ang_max", env.v_ang_max / 4))
 
     active_agents = (~env.dones).nonzero(as_tuple=True)[0]
     if active_agents.numel() == 0:
@@ -65,24 +63,15 @@ def hungarian_p_actions(env, kp: float) -> torch.Tensor:
         heading_error = wrap_angle(desired_heading - env.agent_dir[agent_idx])
 
         target_v_lin = torch.clamp(distance, 0.0, float(env.v_lin_max))
-        dv_lin = torch.clamp(
-            target_v_lin - env.agent_vel_lin[agent_idx],
-            -dv_lin_max,
-            dv_lin_max,
-        )
         target_v_ang = torch.clamp(
             kp * heading_error,
             -float(env.v_ang_max),
             float(env.v_ang_max),
         )
-        dv_ang = torch.clamp(
-            target_v_ang - env.agent_vel_ang[agent_idx],
-            -dv_ang_max,
-            dv_ang_max,
-        )
 
-        actions[agent_idx, 0] = dv_lin / dv_lin_max
-        actions[agent_idx, 1] = dv_ang / dv_ang_max
+        # env: vel_lin = 0.5*(action[0]+1)*v_lin_max, vel_ang = action[1]*v_ang_max
+        actions[agent_idx, 0] = 2.0 * target_v_lin / env.v_lin_max - 1.0
+        actions[agent_idx, 1] = target_v_ang / env.v_ang_max
 
     return actions.clamp(-1.0, 1.0)
 

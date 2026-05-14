@@ -1525,7 +1525,8 @@ class DiffDriveParallelEnvDone(DiffDriveParallelEnv):
         # components[active_agents, 7] = ang_penalty
 
         target_pos = torch.full_like(self.agent_pos, float("nan"), device=device)
-        target_pos[active_agents] = self.landmarks[assigned_landmark_indices[active_agents]]
+        if assigned_landmark_indices.shape[0] > 0:
+            target_pos[active_agents] = self.landmarks[assigned_landmark_indices[active_agents]]
 
         to_landmark = target_pos - self.agent_pos
         to_landmark_norm = torch.norm(to_landmark, dim=1, keepdim=True).clamp(min=1e-8)
