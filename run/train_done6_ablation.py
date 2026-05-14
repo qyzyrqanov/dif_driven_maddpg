@@ -23,7 +23,7 @@ scale=[
         ]
 
 env=DiffDriveParallelEnvDone(
-    v_ang_max=torch.pi/2,
+    v_ang_max=torch.pi/9,
     num_agents=6,
     num_obstacles=0
 )
