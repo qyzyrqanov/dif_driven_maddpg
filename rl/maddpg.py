@@ -686,6 +686,7 @@ class MADDPGBase(ABC):
             min_episodes_before_early_stop:int=min_episodes_before_early_stop,
             meta_extra: Optional[dict] = None,
             meta_path: str = "meta.json",
+            post_episode_callback: Optional[Callable[[int, bool], None]] = None,
     ) -> None:
         """
         Resumable training loop with checkpointing.
@@ -699,6 +700,9 @@ class MADDPGBase(ABC):
                 (e.g. ``{"seed": 9832, "mode": "full"}``). Useful for the
                 compute-cost / reproducibility table.
             meta_path (str): Path of the human-readable JSON metadata file.
+            post_episode_callback (callable, optional): Called after a saved
+                episode checkpoint is written. Receives
+                ``(episodes_completed, finished)``.
         """
 
         # === Load previous training state if exists ===
@@ -817,7 +821,7 @@ class MADDPGBase(ABC):
                 if i>min_episodes_before_early_stop:
                     episodes_without_improvement+=1
 
-            # Save training state every 5 episodes
+            # Preserve the existing checkpoint cadence.
             if i>0:
 
                 print("Training progress saving.")
@@ -852,6 +856,8 @@ class MADDPGBase(ABC):
                     peak_gpu_bytes=peak_gpu_bytes,
                     finished=False,
                 )
+                if post_episode_callback is not None:
+                    post_episode_callback(i + 1, False)
 
                 self.plot_learning_curve()
                 self.plot_actor_loss()
@@ -901,6 +907,8 @@ class MADDPGBase(ABC):
                     peak_gpu_bytes=peak_gpu_bytes,
                     finished=True,
                 )
+                if post_episode_callback is not None:
+                    post_episode_callback(i + 1, True)
                 print("Training progress saved.")
 
                 self.plot_learning_curve()
@@ -920,6 +928,8 @@ class MADDPGBase(ABC):
                 peak_gpu_bytes=peak_gpu_bytes,
                 finished=True,
             )
+            if post_episode_callback is not None:
+                post_episode_callback(n_games, True)
         print("Training complete.")
 
     def _save_meta_json(

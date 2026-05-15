@@ -1,7 +1,7 @@
 """Aggregate revision experiment outputs into tables and figures.
 
 The training/evaluation batch writes artifacts outside the repository under
-``~/Desktop/dif_driven_revision_artifacts``. This module keeps the notebook
+``~/Desktop/dif_driven_revision_corrected_artifacts``. This module keeps the notebook
 thin: it audits run completeness, loads evaluation outputs, parses available
 training curves, and writes the CSV/PNG artifacts needed for Phase 3.
 """
@@ -21,7 +21,7 @@ import pandas as pd
 from scipy import stats
 
 
-ARTIFACT_ROOT = Path.home() / "Desktop" / "dif_driven_revision_artifacts"
+ARTIFACT_ROOT = Path.home() / "Desktop" / "dif_driven_revision_corrected_artifacts"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_RE = re.compile(r"^n(?P<n>[456])_(?P<mode>full|ablation|nocoll)_seed(?P<seed>\d+)$")
 EPISODE_RE = re.compile(

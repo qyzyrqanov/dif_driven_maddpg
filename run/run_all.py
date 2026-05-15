@@ -21,13 +21,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.offload_artifacts import (  # noqa: E402
-    DEFAULT_TARGET_ROOT,
     ensure_target_root,
     offload_run_dir,
 )
 
 PYTHON = sys.executable
-DEFAULT_ARTIFACT_ROOT = Path("/media/abz/Z7S/experiments_revision_corrected")
+DEFAULT_ARTIFACT_ROOT = Path.home() / "Desktop" / "dif_driven_revision_corrected_artifacts"
+DEFAULT_OFFLOAD_ROOT = Path("/media/abz/Z7S/experiments_revision_corrected")
 
 TRAIN_NS = [4, 5, 6]
 TRAIN_SEEDS = [9832, 0, 13]
@@ -82,6 +82,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_steps", type=int, default=500)
     parser.add_argument("--heuristic_kp", type=float, default=2.0)
     parser.add_argument(
+        "--v_ang_max",
+        choices=["pi9", "pi2"],
+        default="pi9",
+        help="Angular velocity cap for training/evaluation. Default pi9 is corrected.",
+    )
+    parser.add_argument(
         "--parallel",
         type=int,
         default=3,
@@ -111,11 +117,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--offload_root",
         type=Path,
-        default=DEFAULT_TARGET_ROOT,
+        default=DEFAULT_OFFLOAD_ROOT,
         help=(
             "External artifact mirror. After each completed training run, run_all "
             "copies that run directory here, verifies file sizes, then prunes local "
-            "heavy files. If unavailable, it only logs a warning."
+            "heavy files. train_seeded also mirrors each saved episode checkpoint "
+            "here. If unavailable, it only logs a warning."
         ),
     )
     parser.add_argument(
@@ -304,6 +311,17 @@ def train_tasks(args: argparse.Namespace) -> list[CommandTask]:
                     str(args.episodes),
                     "--out_dir",
                     str(out_dir),
+                    "--v_ang_max",
+                    args.v_ang_max,
+                    "--artifact_root",
+                    str(args.artifact_root),
+                    "--offload_root",
+                    str(args.offload_root),
+                    *(
+                        ["--disable_episode_offload"]
+                        if args.disable_offload
+                        else []
+                    ),
                 ],
                 done_path=result_csv,
                 lock_path=out_dir / ".run_all.lock",
@@ -354,6 +372,8 @@ def policy_eval_task(
             mode,
             "--env_size",
             str(env_size),
+            "--v_ang_max",
+            args.v_ang_max,
             "--episodes",
             str(args.eval_episodes),
             "--seed",
@@ -394,6 +414,8 @@ def heuristic_eval_tasks(args: argparse.Namespace) -> list[CommandTask]:
                         str(n),
                         "--env_size",
                         "20",
+                        "--v_ang_max",
+                        args.v_ang_max,
                         "--episodes",
                         str(args.eval_episodes),
                         "--seed",
@@ -469,6 +491,8 @@ def probe_task(args: argparse.Namespace) -> CommandTask:
             str(out_csv),
             "--raw_meta_csv",
             str(raw_csv),
+            "--v_ang_max",
+            args.v_ang_max,
         ],
         done_path=out_csv,
         lock_path=out_csv.with_suffix(".lock"),

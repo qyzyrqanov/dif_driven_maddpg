@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_SOURCE_ROOT = Path.home() / "Desktop" / "dif_driven_revision_artifacts"
-DEFAULT_TARGET_ROOT = Path("/media/abz/Z7S/experiments/dif_driven_revision_artifacts")
+DEFAULT_SOURCE_ROOT = Path.home() / "Desktop" / "dif_driven_revision_corrected_artifacts"
+DEFAULT_TARGET_ROOT = Path("/media/abz/Z7S/experiments_revision_corrected")
 
 RUN_RE = re.compile(r"^n(?P<n>[456])_(?P<mode>full|ablation|nocoll)_seed(?P<seed>\d+)$")
 RESULT_SUFFIX = {"full": "", "ablation": "_ablation", "nocoll": "_nocoll"}

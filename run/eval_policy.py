@@ -46,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, choices=[4, 5, 6], required=True)
     parser.add_argument("--env_size", type=float, default=20.0)
     parser.add_argument("--num_obstacles", type=int, default=0)
+    parser.add_argument(
+        "--v_ang_max",
+        choices=["pi9", "pi2"],
+        default="pi9",
+        help="Angular velocity cap. Default pi9 is the corrected canonical setup.",
+    )
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--mode", choices=sorted(SCALES), default="full")
@@ -68,12 +74,19 @@ def build_env(
     num_agents: int,
     env_size: float,
     num_obstacles: int = 0,
+    v_ang_max: str = "pi9",
 ) -> DiffDriveParallelEnvDone:
+    if v_ang_max == "pi9":
+        v_ang = torch.pi / 9
+    elif v_ang_max == "pi2":
+        v_ang = torch.pi / 2
+    else:
+        raise ValueError(f"Unsupported v_ang_max: {v_ang_max}")
     return DiffDriveParallelEnvDone(
         num_agents=num_agents,
         env_size=env_size,
         num_obstacles=num_obstacles,
-        v_ang_max=torch.pi / 2,
+        v_ang_max=v_ang,
     )
 
 
@@ -331,6 +344,7 @@ def main() -> None:
         num_agents=args.n,
         env_size=args.env_size,
         num_obstacles=args.num_obstacles,
+        v_ang_max=args.v_ang_max,
     )
     actor = load_actor(args.actor_ckpt, env)
 

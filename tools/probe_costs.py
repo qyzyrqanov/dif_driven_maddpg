@@ -57,6 +57,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark_n", type=int, default=6)
     parser.add_argument("--benchmark_steps", type=int, default=1000)
     parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument(
+        "--v_ang_max",
+        choices=["pi9", "pi2"],
+        default="pi9",
+        help="Angular velocity cap. Default pi9 is the corrected canonical setup.",
+    )
     return parser.parse_args()
 
 
@@ -138,11 +144,18 @@ def model_and_benchmark_rows(
     benchmark_n: int,
     benchmark_steps: int,
     warmup_steps: int,
+    v_ang_max: str,
 ) -> None:
+    if v_ang_max == "pi9":
+        v_ang = torch.pi / 9
+    elif v_ang_max == "pi2":
+        v_ang = torch.pi / 2
+    else:
+        raise ValueError(f"Unsupported v_ang_max: {v_ang_max}")
     env = DiffDriveParallelEnvDone(
         num_agents=benchmark_n,
         num_obstacles=0,
-        v_ang_max=torch.pi / 2,
+        v_ang_max=v_ang,
     )
     _, obs = env.reset_tensor()
     actor = SimpleActor(env.obs_dim, env.action_dim, device=device)
@@ -160,6 +173,8 @@ def model_and_benchmark_rows(
     add_row(rows, category="training_config", metric="batch_size_config_default", value=batch_size)
     add_row(rows, category="training_config", metric="revision_batch_size", value=128)
     add_row(rows, category="training_config", metric="revision_replay_buffer_size", value=50000)
+    add_row(rows, category="training_config", metric="v_ang_max", value=v_ang_max)
+    add_row(rows, category="training_config", metric="v_ang_max_float", value=float(v_ang))
 
     actor.eval()
     with torch.no_grad():
@@ -360,6 +375,7 @@ def main() -> None:
         benchmark_n=args.benchmark_n,
         benchmark_steps=args.benchmark_steps,
         warmup_steps=args.warmup_steps,
+        v_ang_max=args.v_ang_max,
     )
     metas = load_meta_files(args.runs_dir)
     training_meta_rows(rows, metas)

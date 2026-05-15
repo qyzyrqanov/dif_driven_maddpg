@@ -28,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, choices=[4, 5, 6], required=True)
     parser.add_argument("--env_size", type=float, default=20.0)
     parser.add_argument("--num_obstacles", type=int, default=0)
+    parser.add_argument(
+        "--v_ang_max",
+        choices=["pi9", "pi2"],
+        default="pi9",
+        help="Angular velocity cap. Default pi9 is the corrected canonical setup.",
+    )
     parser.add_argument("--episodes", type=int, default=200)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--Kp", type=float, default=2.0)
@@ -128,6 +134,7 @@ def main() -> None:
         num_agents=args.n,
         env_size=args.env_size,
         num_obstacles=args.num_obstacles,
+        v_ang_max=args.v_ang_max,
     )
 
     start = time.time()
