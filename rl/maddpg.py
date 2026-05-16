@@ -23,6 +23,13 @@ import os
 import pandas as pd
 
 
+def _atomic_pickle_dump(data: dict, filepath: str) -> None:
+    tmp_filepath = f"{filepath}.tmp"
+    with open(tmp_filepath, "wb") as f:
+        pickle.dump(data, f)
+    os.replace(tmp_filepath, filepath)
+
+
 class MADDPGBase(ABC):
     def __init__(
             self,
@@ -710,7 +717,24 @@ class MADDPGBase(ABC):
             with open(checkpoint_path, "rb") as f:
                 state_dict = pickle.load(f)
             start_episode = state_dict["episode"]
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r") as f:
+                        prior_meta = json.load(f)
+                    meta_completed = int(prior_meta.get("episodes_completed") or 0)
+                except Exception:
+                    meta_completed = 0
+                if meta_completed > 0 and start_episode > meta_completed:
+                    print(
+                        f"Resume marker ahead of meta.json: "
+                        f"training_state episode={start_episode}, "
+                        f"meta episodes_completed={meta_completed}. "
+                        f"Restarting from meta boundary."
+                    )
+                    start_episode = meta_completed
             self.score_history = state_dict["score_history"]
+            if len(self.score_history) > start_episode:
+                self.score_history = self.score_history[:start_episode]
             best_score = state_dict["best_score"]
             self.replay_buffer.load("replay_buffer.pkl")
             episodes_without_improvement = state_dict["episodes_without_improvement"]
@@ -838,10 +862,6 @@ class MADDPGBase(ABC):
 
 
                 }
-                with open(checkpoint_path, "wb") as f:
-                    pickle.dump(state_dict, f)
-
-
                 self.replay_buffer.save("replay_buffer.pkl")
 
                 self.save_checkpoint()
@@ -856,6 +876,7 @@ class MADDPGBase(ABC):
                     peak_gpu_bytes=peak_gpu_bytes,
                     finished=False,
                 )
+                _atomic_pickle_dump(state_dict, checkpoint_path)
                 if post_episode_callback is not None:
                     post_episode_callback(i + 1, False)
 
@@ -892,9 +913,6 @@ class MADDPGBase(ABC):
                     'peak_gpu_bytes': peak_gpu_bytes,
 
                 }
-                with open(checkpoint_path, "wb") as f:
-                    pickle.dump(state_dict, f)
-
                 self.replay_buffer.save("replay_buffer.pkl")
                 self.save_checkpoint()
                 self._save_meta_json(
@@ -907,6 +925,7 @@ class MADDPGBase(ABC):
                     peak_gpu_bytes=peak_gpu_bytes,
                     finished=True,
                 )
+                _atomic_pickle_dump(state_dict, checkpoint_path)
                 if post_episode_callback is not None:
                     post_episode_callback(i + 1, True)
                 print("Training progress saved.")

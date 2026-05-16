@@ -115,7 +115,9 @@ class ReplayBuffer:
             'total_tagged': self.total_tagged,
             'batch_size': self.batch_size,
         }
-        torch.save(data, filepath)
+        tmp_filepath = f"{filepath}.tmp"
+        torch.save(data, tmp_filepath)
+        os.replace(tmp_filepath, filepath)
 
     def load(self, filepath: str):
         """

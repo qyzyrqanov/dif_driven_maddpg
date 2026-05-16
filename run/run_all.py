@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -48,6 +48,7 @@ class CommandTask:
     name: str
     cmd: list[str]
     kind: str
+    index: int = 0
     done_path: Path | None = None
     required_paths: tuple[Path, ...] = ()
     result_copy: tuple[Path, Path] | None = None
@@ -195,6 +196,41 @@ def pid_is_running(pid: int) -> bool:
     return True
 
 
+def pid_cmdline(pid: int) -> str:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b" ").decode(errors="replace")
+
+
+def pid_matches_task(pid: int, task: CommandTask) -> bool:
+    cmdline = pid_cmdline(pid)
+    if not cmdline:
+        return False
+    script = str(REPO_ROOT / "run" / "train_seeded.py")
+    if task.kind == "train" and script not in cmdline:
+        return False
+    for token in task.cmd[1:]:
+        if token not in cmdline:
+            return False
+    return True
+
+
+def active_task_lock(task: CommandTask) -> bool:
+    if task.lock_path is None or not task.lock_path.exists():
+        return False
+    try:
+        prior = json.loads(task.lock_path.read_text())
+        raw_pid = prior.get("pid")
+        if raw_pid is None:
+            raw_pid = prior.get("owner_pid")
+        prior_pid = int(raw_pid)
+    except Exception:
+        return False
+    return pid_is_running(prior_pid) and pid_matches_task(prior_pid, task)
+
+
 def acquire_task_lock(task: CommandTask, args: argparse.Namespace) -> bool:
     if task.lock_path is None or args.dry_run:
         return True
@@ -212,7 +248,7 @@ def acquire_task_lock(task: CommandTask, args: argparse.Namespace) -> bool:
         except Exception:
             prior_pid = -1
 
-        if pid_is_running(prior_pid):
+        if pid_is_running(prior_pid) and pid_matches_task(prior_pid, task):
             log(
                 f"SKIP running: {task.name} locked by pid={prior_pid} ({lock_path})",
                 args.log_file,
@@ -268,6 +304,27 @@ def release_task_lock(task: CommandTask, args: argparse.Namespace) -> None:
         pass
 
 
+def prepare_incomplete_train_dir(task: CommandTask, args: argparse.Namespace) -> str | None:
+    if task.kind != "train" or task.cleanup_dir is None:
+        return None
+    if not task.cleanup_dir.exists():
+        return None
+    if training_meta_is_finished(task.cleanup_dir, args):
+        return None
+    if active_task_lock(task):
+        return "running"
+
+    has_artifacts = any(task.cleanup_dir.iterdir())
+    if not has_artifacts:
+        return None
+
+    log(
+        f"RESUME incomplete training dir: {task.cleanup_dir}",
+        args.log_file,
+    )
+    return None
+
+
 def run_dir(runs_dir: Path, n: int, mode: str, seed: int) -> Path:
     return runs_dir / f"n{n}_{mode}_seed{seed}"
 
@@ -287,6 +344,10 @@ def is_generated_train_run(n: int, mode: str, seed: int) -> bool:
 
 def train_done_path(runs_dir: Path, n: int, mode: str, seed: int) -> Path:
     return run_dir(runs_dir, n, mode, seed) / result_filename(n, mode)
+
+
+def with_task_indices(tasks: list[CommandTask]) -> list[CommandTask]:
+    return [replace(task, index=index) for index, task in enumerate(tasks, start=1)]
 
 
 def train_tasks(args: argparse.Namespace) -> list[CommandTask]:
@@ -689,23 +750,27 @@ def pick_ready_task_index(tasks: list[CommandTask], args: argparse.Namespace) ->
 def run_task(task: CommandTask, args: argparse.Namespace) -> str:
     log_file = args.log_file
     if task_is_done(task, args):
-        log(f"SKIP completed: {task.name} ({task.done_path})", log_file)
+        log(f"SKIP completed task#{task.index}: {task.name} ({task.done_path})", log_file)
         copy_result(task.result_copy, log_file)
         offload_finished_task(task, args)
         return "skipped_done"
 
     missing = missing_requirements_for_task(task, args)
     if missing:
-        message = f"SKIP missing requirement: {task.name} requires {missing[0]}"
+        message = f"SKIP missing requirement task#{task.index}: {task.name} requires {missing[0]}"
         if args.strict_missing_eval_actor:
             raise FileNotFoundError(message)
         log(message, log_file)
         return "skipped_missing"
 
+    prepared = prepare_incomplete_train_dir(task, args)
+    if prepared == "running":
+        return "skipped_running"
+
     if not acquire_task_lock(task, args):
         return "skipped_running"
 
-    log(f"START {task.name}", log_file)
+    log(f"START task#{task.index}: {task.name}", log_file)
     log("CMD " + " ".join(task.cmd), log_file)
     if args.dry_run:
         log(f"DRY-RUN finish: {task.name}", log_file)
@@ -799,7 +864,7 @@ def run_tasks_dynamic(
 
                 task = pending_tasks.pop(ready_index)
                 log(
-                    f"{group_name} submit {completed + len(futures) + 1}/{len(tasks)}: {task.name}",
+                    f"{group_name} submit task#{task.index}: {task.name}",
                     args.log_file,
                 )
                 futures[executor.submit(run_task, task, args)] = task
@@ -812,7 +877,7 @@ def run_tasks_dynamic(
                     counts[status] = counts.get(status, 0) + 1
                     completed += 1
                     log(
-                        f"{group_name} completed {completed}/{len(tasks)}: {task.name} [{status}]",
+                        f"{group_name} handled {completed}/{len(tasks)} task#{task.index}: {task.name} [{status}]",
                         args.log_file,
                     )
                 continue
@@ -825,7 +890,7 @@ def run_tasks_dynamic(
             for task in blocked:
                 missing = missing_requirements_for_task(task, args)
                 if missing:
-                    message = f"SKIP missing requirement: {task.name} requires {missing[0]}"
+                    message = f"SKIP missing requirement task#{task.index}: {task.name} requires {missing[0]}"
                     if args.strict_missing_eval_actor:
                         raise FileNotFoundError(message)
                     log(message, args.log_file)
@@ -835,7 +900,7 @@ def run_tasks_dynamic(
                 counts[status] = counts.get(status, 0) + 1
                 completed += 1
                 log(
-                    f"{group_name} completed {completed}/{len(tasks)}: {task.name} [{status}]",
+                    f"{group_name} handled {completed}/{len(tasks)} task#{task.index}: {task.name} [{status}]",
                     args.log_file,
                 )
 
@@ -985,6 +1050,14 @@ def main() -> None:
     probe_phase_tasks = (
         [] if args.skip_probe or args.train_only else [probe_task(args)]
     )
+    all_phase_tasks = with_task_indices(
+        train_phase_tasks + eval_phase_tasks + probe_phase_tasks
+    )
+    train_count = len(train_phase_tasks)
+    eval_count = len(eval_phase_tasks)
+    train_phase_tasks = all_phase_tasks[:train_count]
+    eval_phase_tasks = all_phase_tasks[train_count : train_count + eval_count]
+    probe_phase_tasks = all_phase_tasks[train_count + eval_count :]
 
     total_tasks = len(train_phase_tasks) + len(eval_phase_tasks) + len(probe_phase_tasks)
     log(
@@ -1001,7 +1074,6 @@ def main() -> None:
         "dry_run": 0,
     }
 
-    all_phase_tasks = train_phase_tasks + eval_phase_tasks + probe_phase_tasks
     write_completeness_report(all_phase_tasks, args)
     if args.check_completeness:
         return
