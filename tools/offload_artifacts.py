@@ -261,24 +261,45 @@ def copy_tree_verified(
     for src_file in files:
         rel = src_file.relative_to(source)
         dst_file = target / rel
-        try:
-            src_size = src_file.stat().st_size
-        except FileNotFoundError:
-            progress_bar.update(files=1)
-            continue
-        copied += 1
         if dry_run:
+            try:
+                src_size = src_file.stat().st_size
+            except FileNotFoundError:
+                progress_bar.update(files=1)
+                continue
             log(f"DRY copy {src_file} -> {dst_file}")
             progress_bar.update(files=1, bytes_count=src_size)
+            copied += 1
             continue
 
-        dst_file.parent.mkdir(parents=True, exist_ok=True)
-        if not dst_file.exists() or dst_file.stat().st_size != src_size:
-            shutil.copy2(src_file, dst_file)
-
-        if dst_file.stat().st_size != src_size:
-            raise IOError(f"copy verification failed: {src_file} -> {dst_file}")
-        progress_bar.update(files=1, bytes_count=src_size)
+        # Retry loop to survive live-write races (e.g. rewards.csv being
+        # appended to by an active train_seeded.py).
+        success = False
+        last_err = None
+        for attempt in range(3):
+            if not file_is_stable(src_file, settle_seconds=0.3):
+                last_err = "source still being written"
+                continue
+            try:
+                src_size = src_file.stat().st_size
+            except FileNotFoundError:
+                success = True  # vanished — treat as skip
+                break
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            if not dst_file.exists() or dst_file.stat().st_size != src_size:
+                shutil.copy2(src_file, dst_file)
+            try:
+                if dst_file.stat().st_size == src_size:
+                    success = True
+                    progress_bar.update(files=1, bytes_count=src_size)
+                    copied += 1
+                    break
+                last_err = f"size mismatch dst={dst_file.stat().st_size} src={src_size}"
+            except FileNotFoundError:
+                last_err = "dst vanished"
+        if not success:
+            log(f"WARN skip unstable file {src_file}: {last_err}")
+            progress_bar.update(files=1)
     progress_bar.finish()
     return copied
 
