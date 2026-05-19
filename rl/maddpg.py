@@ -20,6 +20,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pickle
 import os
+import random
+import re
 import pandas as pd
 
 
@@ -222,6 +224,9 @@ class MADDPGBase(ABC):
             start_training_after=start_training_after,
             rescale_env_rewards=None,
             min_episodes_before_early_stop: int = min_episodes_before_early_stop,
+            meta_extra: Optional[dict] = None,
+            meta_path: str = "meta.json",
+            post_episode_callback: Optional[Callable[[int, bool], None]] = None,
     ) -> None:
         """
         Resumable training loop with checkpointing.
@@ -234,8 +239,81 @@ class MADDPGBase(ABC):
         """
 
         # === Load previous training state if exists ===
-        if os.path.exists(checkpoint_path):
-            with open(checkpoint_path, "rb") as f:
+        # ---- Resumed train-time accumulator for meta.json ----
+        resumed_train_seconds = 0.0
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as f:
+                    resumed_train_seconds = float(json.load(f).get("total_train_seconds", 0.0))
+            except Exception:
+                resumed_train_seconds = 0.0
+        loop_start_wall = time.time()
+
+        # ---- Early-exit if this run is already complete (meta.json says so) ----
+        meta_completed_prior = 0
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r") as f:
+                    _prior_meta = json.load(f)
+                meta_completed_prior = int(_prior_meta.get("episodes_completed") or 0)
+            except Exception:
+                meta_completed_prior = 0
+        if meta_completed_prior >= n_games:
+            print(
+                f"main_loop: meta.json says episodes_completed={meta_completed_prior} "
+                f">= n_games={n_games}; nothing to do, exiting."
+            )
+            try:
+                self._save_meta_json(
+                    meta_path=meta_path,
+                    meta_extra=meta_extra,
+                    n_games_target=n_games,
+                    episodes_completed=meta_completed_prior,
+                    total_steps=int(_prior_meta.get("total_steps") or 0),
+                    total_train_seconds=float(_prior_meta.get("total_train_seconds") or 0.0),
+                    peak_gpu_bytes=int(_prior_meta.get("peak_gpu_bytes") or 0),
+                    finished=True,
+                )
+            except Exception:
+                pass
+            if post_episode_callback is not None:
+                try:
+                    post_episode_callback(meta_completed_prior, True)
+                except Exception:
+                    pass
+            return
+
+        # ---- Choose checkpoint to resume from (training_state.pkl, or
+        # latest episode_*_training_state.pkl fallback if main pkl missing) ----
+        resume_pkl = checkpoint_path if os.path.exists(checkpoint_path) else None
+        if resume_pkl is None:
+            cand = []
+            try:
+                for name in os.listdir("."):
+                    m = re.match(r"^episode_(\d+)_" + re.escape(checkpoint_path) + r"$", name)
+                    if m:
+                        cand.append((int(m.group(1)), name))
+            except FileNotFoundError:
+                pass
+            if cand:
+                cand.sort()
+                ep_num, resume_pkl = cand[-1]
+                print(
+                    f"main_loop: {checkpoint_path} missing; falling back to "
+                    f"{resume_pkl} (episode {ep_num})."
+                )
+        # Hard guard: if meta says we already trained but no checkpoint exists,
+        # refuse to silently restart from scratch.
+        if resume_pkl is None and meta_completed_prior > 0:
+            raise RuntimeError(
+                f"main_loop refuses to restart from scratch: meta.json reports "
+                f"episodes_completed={meta_completed_prior} but no "
+                f"{checkpoint_path} or episode_*_{checkpoint_path} found in "
+                f"{os.getcwd()}. Restore checkpoint from offload before resuming."
+            )
+
+        if resume_pkl is not None:
+            with open(resume_pkl, "rb") as f:
                 state_dict = pickle.load(f)
             start_episode = state_dict["episode"]
             self.score_history = state_dict["score_history"]
@@ -250,6 +328,26 @@ class MADDPGBase(ABC):
                 total_tagged = state_dict['total_tagged']
             else:
                 total_tagged = total_steps
+
+            rng = state_dict.get('rng')
+            if rng is not None:
+                try:
+                    if 'python' in rng:
+                        random.setstate(rng['python'])
+                    if 'numpy' in rng:
+                        np.random.set_state(rng['numpy'])
+                    if 'torch' in rng:
+                        torch.set_rng_state(rng['torch'])
+                    if 'torch_cuda' in rng and torch.cuda.is_available():
+                        torch.cuda.set_rng_state_all(rng['torch_cuda'])
+                    print(f"Restored RNG state from {resume_pkl}.")
+                except Exception as exc:
+                    print(f"RNG restore failed ({exc!r}); continuing with current RNG.")
+            else:
+                print(
+                    "No RNG state in checkpoint; resumed rollouts will diverge "
+                    "from the uninterrupted trajectory for this seed."
+                )
 
             print(f"Resuming from episode {start_episode}")
         else:
@@ -350,9 +448,15 @@ class MADDPGBase(ABC):
                     "best_score": best_score,
                     'episodes_without_improvement': episodes_without_improvement,
                     'total_steps': total_steps,
+                    'total_tagged': total_tagged,
                     'actor_losses': self.actor_losses,
-                    'critic_losses': self.critic_losses
-
+                    'critic_losses': self.critic_losses,
+                    'rng': {
+                        'python': random.getstate(),
+                        'numpy': np.random.get_state(),
+                        'torch': torch.get_rng_state(),
+                        'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                    },
                 }
                 with open(checkpoint_path, "wb") as f:
                     pickle.dump(state_dict, f)
@@ -383,6 +487,28 @@ class MADDPGBase(ABC):
 
 
                     print("plotted")
+                # ---- meta.json + offload callback (per-episode) ----
+                try:
+                    peak_gpu = (
+                        torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+                    )
+                    self._save_meta_json(
+                        meta_path=meta_path,
+                        meta_extra=meta_extra,
+                        n_games_target=n_games,
+                        episodes_completed=i + 1,
+                        total_steps=total_steps,
+                        total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
+                        peak_gpu_bytes=peak_gpu,
+                        finished=False,
+                    )
+                except Exception as exc:
+                    print(f"meta save (main_loop) failed: {exc!r}", flush=True)
+                if post_episode_callback is not None:
+                    try:
+                        post_episode_callback(i + 1, False)
+                    except Exception as exc:
+                        print(f"post_episode_callback failed: {exc!r}", flush=True)
             if episodes_without_improvement >= patience:
                 print(f"\n🛑 Early stopping triggered: No improvement in {patience} episodes.")
                 print("Training progress saving.")
@@ -392,9 +518,15 @@ class MADDPGBase(ABC):
                     "best_score": best_score,
                     'episodes_without_improvement': episodes_without_improvement,
                     'total_steps': total_steps,
+                    'total_tagged': total_tagged,
                     'actor_losses': self.actor_losses,
-                    'critic_losses': self.critic_losses
-
+                    'critic_losses': self.critic_losses,
+                    'rng': {
+                        'python': random.getstate(),
+                        'numpy': np.random.get_state(),
+                        'torch': torch.get_rng_state(),
+                        'torch_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                    },
                 }
                 with open(checkpoint_path, "wb") as f:
                     pickle.dump(state_dict, f)
@@ -443,6 +575,28 @@ class MADDPGBase(ABC):
                 self.log_episode(episode_id=f'{i}_replayed', env=env)
                 env.delete()
                 del env
+        # ---- Final meta + offload callback ----
+        try:
+            peak_gpu = (
+                torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+            )
+            self._save_meta_json(
+                meta_path=meta_path,
+                meta_extra=meta_extra,
+                n_games_target=n_games,
+                episodes_completed=n_games,
+                total_steps=total_steps,
+                total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
+                peak_gpu_bytes=peak_gpu,
+                finished=True,
+            )
+        except Exception as exc:
+            print(f"final meta save (main_loop) failed: {exc!r}", flush=True)
+        if post_episode_callback is not None:
+            try:
+                post_episode_callback(n_games, True)
+            except Exception as exc:
+                print(f"final post_episode_callback failed: {exc!r}", flush=True)
         print("Training complete.")
     def add_record_to_rb(self, state, obs, actions, rewards, next_state, next_obs, done, tagged=False):
         if self.use_tagged_replay_buffer:

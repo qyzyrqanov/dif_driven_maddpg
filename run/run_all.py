@@ -32,9 +32,11 @@ DEFAULT_OFFLOAD_ROOT = Path("/media/abz/Z7S/experiments_revision_corrected")
 TRAIN_NS = [4, 5, 6]
 TRAIN_SEEDS = [9832, 0, 13]
 NEW_TRAIN_RUNS = [
-    *[(n, "full", seed) for n in TRAIN_NS for seed in [0, 13]],
-    *[(n, "ablation", seed) for n in TRAIN_NS for seed in [0, 13]],
-    (6, "ablation", 9832),
+    # Include every learned-policy prerequisite used by eval_tasks(). Historical
+    # seed-9832 full/n4-n5 ablation runs are skipped when present, but are
+    # retrained if their corrected artifact directories are missing.
+    *[(n, "full", seed) for n in TRAIN_NS for seed in TRAIN_SEEDS],
+    *[(n, "ablation", seed) for n in TRAIN_NS for seed in TRAIN_SEEDS],
     *[(n, "nocoll", seed) for n in TRAIN_NS for seed in TRAIN_SEEDS],
 ]
 POLICY_EVAL_MODES = ["full", "ablation", "nocoll"]
@@ -84,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--heuristic_kp", type=float, default=2.0)
     parser.add_argument(
         "--v_ang_max",
-        choices=["pi9", "pi2"],
+        choices=["pi9", "pi6", "pi2"],
         default="pi9",
         help="Angular velocity cap for training/evaluation. Default pi9 is corrected.",
     )
@@ -710,7 +712,7 @@ def task_is_done(task: CommandTask, args: argparse.Namespace) -> bool:
             and not args.rerun
         )
     if task.kind == "eval" and task.done_path is not None and not args.rerun:
-        return eval_task_is_complete(task, args)
+        return not missing_requirements_for_task(task, args) and eval_task_is_complete(task, args)
     return (
         task.done_path is not None
         and path_exists_local_or_offloaded(task.done_path, args)

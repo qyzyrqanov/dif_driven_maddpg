@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_obstacles", type=int, default=0)
     parser.add_argument(
         "--v_ang_max",
-        choices=["pi9", "pi2"],
+        choices=["pi9", "pi6", "pi2"],
         default="pi9",
         help="Angular velocity cap. Default pi9 is the corrected canonical setup.",
     )

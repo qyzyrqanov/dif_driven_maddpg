@@ -49,9 +49,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out_dir", type=Path, required=True)
     parser.add_argument(
         "--v_ang_max",
-        choices=["pi9", "pi2"],
-        default="pi9",
-        help="Angular velocity cap. Default pi9 is the corrected canonical setup.",
+        choices=["pi9", "pi6", "pi2"],
+        default="pi2",
+        help="Angular velocity cap. Default pi2 — confirmed Z7S value (2026-05-18 evidence).",
+    )
+    parser.add_argument(
+        "--use_offline_replay",
+        action="store_true",
+        help="Use MADDPGBase.main_loop with offline_replay_success (HER-style "
+             "goal relabeling) instead of train_loop. Addresses sparse-reward "
+             "bootstrap failure for higher N. Disclosed as revision-stage enhancement.",
     )
     parser.add_argument(
         "--artifact_root",
@@ -74,21 +81,56 @@ def parse_args() -> argparse.Namespace:
 
 
 def set_seeds(seed: int) -> None:
+    import random as _random
+    _random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    # Bit-deterministic CUDA. Required for replayability across runs/resumes.
+    # CUBLAS_WORKSPACE_CONFIG must be set BEFORE the first CUDA op (we set it
+    # here on import-time call before env construction). ~10-30% perf cost.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except Exception as exc:
+        print(f"use_deterministic_algorithms not available: {exc!r}", flush=True)
 
 
 def rename_rewards_csv(num_agents: int, mode: str) -> str | None:
-    source = Path("rewards.csv")
-    if not source.exists():
-        return None
+    """Move rewards.csv -> result{N}{suffix}.csv at end of run.
 
+    Resume-safe: if a target already exists from a prior completed run in the
+    same out_dir, merge by episode_id (target rows for episodes also present
+    in source are dropped in favor of source rows; new source episodes are
+    appended). This prevents truncating a full result CSV when a run is
+    relaunched and only produces a few additional episodes.
+    """
+    source = Path("rewards.csv")
     target = Path(f"result{num_agents}{CSV_SUFFIX[mode]}.csv")
+
+    if not source.exists():
+        return str(target) if target.exists() else None
+
     if target.exists():
-        target.unlink()
-    source.rename(target)
+        import pandas as pd
+        old = pd.read_csv(target)
+        new = pd.read_csv(source)
+        if "episode_id" in old.columns and "episode_id" in new.columns:
+            new_episodes = set(new["episode_id"].unique())
+            old_keep = old[~old["episode_id"].isin(new_episodes)]
+            combined = pd.concat([old_keep, new], ignore_index=True)
+            combined = combined.sort_values(["episode_id", "timestep"]
+                                            if "timestep" in combined.columns
+                                            else ["episode_id"]).reset_index(drop=True)
+        else:
+            combined = pd.concat([old, new], ignore_index=True)
+        combined.to_csv(target, index=False)
+        source.unlink()
+    else:
+        source.rename(target)
     return str(target)
 
 
@@ -106,6 +148,8 @@ def update_meta(meta_path: Path, extra: dict) -> None:
 def parse_v_ang_max(value: str) -> torch.Tensor:
     if value == "pi9":
         return torch.pi / 9
+    if value == "pi6":
+        return torch.pi / 6
     if value == "pi2":
         return torch.pi / 2
     raise ValueError(f"Unsupported --v_ang_max: {value}")
@@ -187,6 +231,8 @@ def main() -> None:
         "episodes_requested": args.episodes,
         "v_ang_max": args.v_ang_max,
         "v_ang_max_float": float(v_ang_max),
+        "use_offline_replay": bool(args.use_offline_replay),
+        "training_loop": "main_loop" if args.use_offline_replay else "train_loop",
         "out_dir": str(out_dir),
         "command_start_iso": start_iso,
     }
@@ -198,7 +244,8 @@ def main() -> None:
     )
 
     try:
-        maddpg.train_loop(
+        loop_fn = maddpg.main_loop if args.use_offline_replay else maddpg.train_loop
+        loop_fn(
             start_training_after=500,
             train_each=100,
             patience=256,

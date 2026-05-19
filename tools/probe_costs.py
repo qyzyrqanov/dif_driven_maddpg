@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument(
         "--v_ang_max",
-        choices=["pi9", "pi2"],
+        choices=["pi9", "pi6", "pi2"],
         default="pi9",
         help="Angular velocity cap. Default pi9 is the corrected canonical setup.",
     )
@@ -148,6 +148,8 @@ def model_and_benchmark_rows(
 ) -> None:
     if v_ang_max == "pi9":
         v_ang = torch.pi / 9
+    elif v_ang_max == "pi6":
+        v_ang = torch.pi / 6
     elif v_ang_max == "pi2":
         v_ang = torch.pi / 2
     else:
