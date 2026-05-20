@@ -32,7 +32,7 @@ cd "$REPO_ROOT"
 source "$REPO_ROOT/.venvLin/bin/activate"
 export PYTHONPATH="$REPO_ROOT"
 
-PARALLEL="${PARALLEL:-3}"
+PARALLEL="${PARALLEL:-5}"
 SEEDS="${SEEDS:-1 2 3 4 5}"
 MODES="${MODES:-full ablation nocoll}"
 NS="${NS:-4 5 6}"
@@ -87,7 +87,9 @@ except Exception:
         fi
     fi
 
-    echo "[seed=$seed n=$n mode=$mode] START  -> $log_file"
+    local t_start
+    t_start=$(date +%s)
+    echo "[seed=$seed n=$n mode=$mode] START  $(date -Iseconds)  -> $log_file"
     local offload_flag=()
     if [ "${OFFLOAD:-1}" = "0" ]; then
         offload_flag=(--disable_episode_offload)
@@ -103,10 +105,17 @@ except Exception:
         "${offload_flag[@]}" \
         > "$log_file" 2>&1
     local rc=$?
+    local t_end elapsed h m s dur
+    t_end=$(date +%s)
+    elapsed=$(( t_end - t_start ))
+    h=$(( elapsed / 3600 ))
+    m=$(( (elapsed % 3600) / 60 ))
+    s=$(( elapsed % 60 ))
+    dur=$(printf "%dh%02dm%02ds" "$h" "$m" "$s")
     if [ $rc -eq 0 ]; then
-        echo "[seed=$seed n=$n mode=$mode] DONE   rc=0"
+        echo "[seed=$seed n=$n mode=$mode] DONE   rc=0  elapsed=$dur"
     else
-        echo "[seed=$seed n=$n mode=$mode] FAILED rc=$rc (see $log_file)"
+        echo "[seed=$seed n=$n mode=$mode] FAILED rc=$rc elapsed=$dur (see $log_file)"
     fi
     return $rc
 }
@@ -115,6 +124,7 @@ export -f run_one
 export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD
 
 for seed in $SEEDS; do
+    seed_t_start=$(date +%s)
     echo
     echo ">>>>>>>>>> SEED $seed START : $(date -Iseconds) <<<<<<<<<<"
 
@@ -140,7 +150,9 @@ for seed in $SEEDS; do
     wait
     rm -f "$jobs_file"
 
-    echo ">>>>>>>>>> SEED $seed DONE  : $(date -Iseconds) <<<<<<<<<<"
+    seed_elapsed=$(( $(date +%s) - seed_t_start ))
+    seed_dur=$(printf "%dh%02dm%02ds" $((seed_elapsed/3600)) $(((seed_elapsed%3600)/60)) $((seed_elapsed%60)))
+    echo ">>>>>>>>>> SEED $seed DONE  : $(date -Iseconds)  elapsed=$seed_dur <<<<<<<<<<"
 done
 
 echo

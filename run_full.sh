@@ -21,7 +21,7 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
 
 # --- Defaults (overridable via env) ---
-export PARALLEL="${PARALLEL:-3}"
+export PARALLEL="${PARALLEL:-5}"
 export SEEDS="${SEEDS:-1 2 3 4 5}"
 export NS="${NS:-4 5 6}"
 export MODES="${MODES:-full ablation nocoll}"
