@@ -123,37 +123,37 @@ except Exception:
 export -f run_one
 export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD
 
+# Global job queue: ordered seed-first, then n, then mode.
+# A single pool of size $PARALLEL consumes the queue — slots refill
+# greedily across seed boundaries, so seed K+1 can begin while a slow
+# tail run from seed K is still finishing. Launch ORDER still prioritises
+# lower seeds (and within a seed, lower n / earlier mode).
+jobs_file="$(mktemp)"
 for seed in $SEEDS; do
-    seed_t_start=$(date +%s)
-    echo
-    echo ">>>>>>>>>> SEED $seed START : $(date -Iseconds) <<<<<<<<<<"
-
-    # Build the (seed, n, mode) jobs for this seed
-    jobs_file="$(mktemp)"
     for n in $NS; do
         for mode in $MODES; do
             printf "%s\t%s\t%s\n" "$seed" "$n" "$mode" >> "$jobs_file"
         done
     done
-
-    # Run jobs in parallel up to $PARALLEL, but all for THIS seed only.
-    # We wait for the whole batch before moving to the next seed.
-    while IFS=$'\t' read -r s n m; do
-        # cap concurrency
-        while [ "$(jobs -rp | wc -l)" -ge "$PARALLEL" ]; do
-            sleep 2
-        done
-        run_one "$s" "$n" "$m" &
-    done < "$jobs_file"
-
-    # Block until ALL background jobs for this seed finish
-    wait
-    rm -f "$jobs_file"
-
-    seed_elapsed=$(( $(date +%s) - seed_t_start ))
-    seed_dur=$(printf "%dh%02dm%02ds" $((seed_elapsed/3600)) $(((seed_elapsed%3600)/60)) $((seed_elapsed%60)))
-    echo ">>>>>>>>>> SEED $seed DONE  : $(date -Iseconds)  elapsed=$seed_dur <<<<<<<<<<"
 done
+
+total_jobs=$(wc -l < "$jobs_file")
+echo "Queued $total_jobs jobs (seed-first order), running up to $PARALLEL in parallel."
+batch_t_start=$(date +%s)
+
+while IFS=$'\t' read -r s n m; do
+    while [ "$(jobs -rp | wc -l)" -ge "$PARALLEL" ]; do
+        sleep 2
+    done
+    run_one "$s" "$n" "$m" &
+done < "$jobs_file"
+
+wait
+rm -f "$jobs_file"
+
+batch_elapsed=$(( $(date +%s) - batch_t_start ))
+batch_dur=$(printf "%dh%02dm%02ds" $((batch_elapsed/3600)) $(((batch_elapsed%3600)/60)) $((batch_elapsed%60)))
+echo ">>>>>>>>>> ALL JOBS DONE : $(date -Iseconds)  elapsed=$batch_dur <<<<<<<<<<"
 
 echo
 echo "All seeds complete."
