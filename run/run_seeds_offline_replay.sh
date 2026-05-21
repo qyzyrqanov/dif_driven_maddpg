@@ -145,14 +145,73 @@ total_jobs=$(wc -l < "$jobs_file")
 echo "Queued $total_jobs jobs (seed-first order), running up to $PARALLEL in parallel."
 batch_t_start=$(date +%s)
 
+# Background progress monitor: every PROGRESS_INTERVAL seconds, scan
+# ARTIFACT_ROOT/runs/*/meta.json + .run_all.lock and print one line per
+# in-flight run with episodes_completed/target. Disable with PROGRESS=0.
+PROGRESS="${PROGRESS:-1}"
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
+monitor_pid=""
+if [ "$PROGRESS" = "1" ]; then
+    python3 - "$ARTIFACT_ROOT/runs" "$PROGRESS_INTERVAL" <<'PYEOF' &
+import json, os, sys, time
+runs_root, interval = sys.argv[1], float(sys.argv[2])
+def alive(pid):
+    if pid <= 0: return False
+    try: os.kill(pid, 0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    return True
+while True:
+    time.sleep(interval)
+    lines = []
+    try:
+        entries = sorted(os.listdir(runs_root))
+    except FileNotFoundError:
+        continue
+    for name in entries:
+        d = os.path.join(runs_root, name)
+        lock = os.path.join(d, ".run_all.lock")
+        if not os.path.isfile(lock):
+            continue
+        try:
+            lp = json.load(open(lock))
+            if not alive(int(lp.get("pid") or -1)):
+                continue
+        except Exception:
+            continue
+        done = total = "?"
+        try:
+            m = json.load(open(os.path.join(d, "meta.json")))
+            done = m.get("episodes_completed", "?")
+            total = m.get("n_games_target") or m.get("episodes_requested") or "?"
+        except Exception:
+            pass
+        lines.append(f"  … {name}: {done}/{total}")
+    if lines:
+        print(f"[progress {time.strftime('%H:%M:%S')}] in-flight:", flush=True)
+        for ln in lines:
+            print(ln, flush=True)
+PYEOF
+    monitor_pid=$!
+    # Make sure the monitor dies with us, even on Ctrl-C.
+    trap 'kill "$monitor_pid" 2>/dev/null' EXIT INT TERM
+fi
+
 while IFS=$'\t' read -r s n m; do
-    while [ "$(jobs -rp | wc -l)" -ge "$PARALLEL" ]; do
+    while [ "$(jobs -rp | grep -vx "${monitor_pid:-x}" | wc -l)" -ge "$PARALLEL" ]; do
         sleep 2
     done
     run_one "$s" "$n" "$m" &
 done < "$jobs_file"
 
-wait
+# Wait only for run_one workers, not the monitor.
+for pid in $(jobs -rp | grep -vx "${monitor_pid:-x}"); do
+    wait "$pid" 2>/dev/null
+done
+if [ -n "$monitor_pid" ]; then
+    kill "$monitor_pid" 2>/dev/null
+    wait "$monitor_pid" 2>/dev/null
+fi
 rm -f "$jobs_file"
 
 batch_elapsed=$(( $(date +%s) - batch_t_start ))
