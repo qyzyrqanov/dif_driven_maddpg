@@ -149,7 +149,7 @@ batch_t_start=$(date +%s)
 # ARTIFACT_ROOT/runs/*/meta.json + .run_all.lock and print one line per
 # in-flight run with episodes_completed/target. Disable with PROGRESS=0.
 PROGRESS="${PROGRESS:-1}"
-PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-300}"
 monitor_pid=""
 if [ "$PROGRESS" = "1" ]; then
     python3 - "$ARTIFACT_ROOT/runs" "$PROGRESS_INTERVAL" <<'PYEOF' &
