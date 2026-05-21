@@ -149,7 +149,7 @@ batch_t_start=$(date +%s)
 # ARTIFACT_ROOT/runs/*/meta.json + .run_all.lock and print one line per
 # in-flight run with episodes_completed/target. Disable with PROGRESS=0.
 PROGRESS="${PROGRESS:-1}"
-PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-300}"
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-60}"
 monitor_pid=""
 if [ "$PROGRESS" = "1" ]; then
     python3 - "$ARTIFACT_ROOT/runs" "$PROGRESS_INTERVAL" <<'PYEOF' &
@@ -168,12 +168,8 @@ def alive(pid):
     except PermissionError: return True
     return True
 last_lines = 0
-first = True
 while True:
-    # First tick: short wait so trainers have time to write their lock + meta.
-    # Subsequent ticks: full interval.
-    time.sleep(5 if first else interval)
-    first = False
+    time.sleep(interval)
     rows = []
     try:
         entries = sorted(os.listdir(runs_root))
