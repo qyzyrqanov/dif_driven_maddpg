@@ -77,6 +77,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable per-episode artifact mirroring.",
     )
+    parser.add_argument(
+        "--offload_mode",
+        choices=["end", "every", "every_k"],
+        default="end",
+        help="When to mirror artifacts to --offload_root. "
+             "'end' (default): only once, on the final episode of the run — "
+             "one offload per run, no per-episode USB cost. "
+             "'every': mirror after every episode (old behaviour, slow on USB). "
+             "'every_k': mirror every --offload_every episodes.",
+    )
+    parser.add_argument(
+        "--offload_every",
+        type=int,
+        default=10,
+        help="Used only when --offload_mode=every_k. Default 10.",
+    )
     return parser.parse_args()
 
 
@@ -134,6 +150,69 @@ def rename_rewards_csv(num_agents: int, mode: str) -> str | None:
     return str(target)
 
 
+def acquire_run_lock(out_dir: Path) -> Path | None:
+    """Write .run_all.lock so concurrent manual offloads skip this dir.
+
+    Honours an existing lock only if its pid is still alive; stale locks
+    (process gone) are overwritten. Returns the lock path on success,
+    None on failure (in which case the caller proceeds without a lock —
+    manual offload may then race with us, but training will still finish).
+    """
+    import socket
+    lock_path = out_dir / ".run_all.lock"
+    if lock_path.exists():
+        try:
+            prior = json.loads(lock_path.read_text())
+            prior_pid = int(prior.get("pid") or prior.get("owner_pid") or -1)
+            if prior_pid > 0 and prior_pid != os.getpid():
+                try:
+                    os.kill(prior_pid, 0)
+                    # Another live process owns this run dir — bail.
+                    print(
+                        f"WARN: .run_all.lock held by live pid={prior_pid}; "
+                        f"another trainer is already in {out_dir}",
+                        flush=True,
+                    )
+                    return None
+                except ProcessLookupError:
+                    pass  # stale, overwrite
+                except PermissionError:
+                    print(
+                        f"WARN: .run_all.lock pid={prior_pid} alive but not ours; "
+                        "proceeding cautiously",
+                        flush=True,
+                    )
+                    return None
+        except Exception:
+            pass  # malformed, overwrite
+    payload = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "script": "run/train_seeded.py",
+    }
+    try:
+        lock_path.write_text(json.dumps(payload))
+        return lock_path
+    except OSError as exc:
+        print(f"WARN: could not write .run_all.lock: {exc!r}", flush=True)
+        return None
+
+
+def release_run_lock(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        # Only remove if we still own it.
+        payload = json.loads(lock_path.read_text())
+        if int(payload.get("pid") or -1) == os.getpid():
+            lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"WARN: could not release .run_all.lock: {exc!r}", flush=True)
+
+
 def update_meta(meta_path: Path, extra: dict) -> None:
     if meta_path.exists():
         with meta_path.open("r") as f:
@@ -161,6 +240,8 @@ def make_episode_offload_callback(
     artifact_root: Path | None,
     offload_root: Path | None,
     disabled: bool,
+    mode: str = "end",
+    every: int = 10,
 ) -> Callable[[int, bool], None] | None:
     if disabled or offload_root is None:
         return None
@@ -171,7 +252,20 @@ def make_episode_offload_callback(
         print(f"Episode offload disabled: target root unavailable: {offload_root}", flush=True)
         return None
 
+    every = max(1, int(every))
+
+    def should_run(episodes_completed: int, finished: bool) -> bool:
+        if finished:
+            return True
+        if mode == "end":
+            return False
+        if mode == "every_k":
+            return (episodes_completed % every) == 0
+        return True  # mode == "every"
+
     def callback(episodes_completed: int, finished: bool) -> None:
+        if not should_run(episodes_completed, finished):
+            return
         try:
             result = offload_run_dir(
                 out_dir,
@@ -211,6 +305,12 @@ def main() -> None:
 
     os.chdir(out_dir)
 
+    lock_path = acquire_run_lock(out_dir)
+    if lock_path is None:
+        # Another live trainer owns this dir — refuse to step on it.
+        print(f"ERROR: {out_dir} already locked by another trainer; aborting.", flush=True)
+        sys.exit(2)
+
     v_ang_max = parse_v_ang_max(args.v_ang_max)
     env = DiffDriveParallelEnvDone(
         num_agents=args.n,
@@ -241,6 +341,8 @@ def main() -> None:
         artifact_root=args.artifact_root,
         offload_root=args.offload_root,
         disabled=args.disable_episode_offload,
+        mode=args.offload_mode,
+        every=args.offload_every,
     )
 
     try:
@@ -280,6 +382,8 @@ def main() -> None:
                 "result_csv": renamed_csv,
             },
         )
+    finally:
+        release_run_lock(lock_path)
 
 
 if __name__ == "__main__":

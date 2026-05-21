@@ -40,7 +40,9 @@ EPISODES="${EPISODES:-1000}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_offline_replay_artifacts}"
 OFFLOAD_ROOT="${OFFLOAD_ROOT:-/media/abz/Z7S/experiments_revision_offline_replay}"
 V_ANG_MAX="${V_ANG_MAX:-pi2}"
-OFFLOAD="${OFFLOAD:-1}"  # 1 = mirror per-episode to OFFLOAD_ROOT, 0 = disable
+OFFLOAD="${OFFLOAD:-1}"  # 1 = mirror to OFFLOAD_ROOT, 0 = disable
+OFFLOAD_MODE="${OFFLOAD_MODE:-end}"   # end | every | every_k — when to mirror to USB
+OFFLOAD_EVERY="${OFFLOAD_EVERY:-10}"  # only used when OFFLOAD_MODE=every_k
 LOG_DIR="${LOG_DIR:-$ARTIFACT_ROOT/logs}"
 
 mkdir -p "$ARTIFACT_ROOT/runs" "$LOG_DIR"
@@ -102,6 +104,8 @@ except Exception:
         --out_dir "$out_dir" \
         --artifact_root "$ARTIFACT_ROOT" \
         --offload_root "$OFFLOAD_ROOT" \
+        --offload_mode "$OFFLOAD_MODE" \
+        --offload_every "$OFFLOAD_EVERY" \
         "${offload_flag[@]}" \
         > "$log_file" 2>&1
     local rc=$?
@@ -121,7 +125,7 @@ except Exception:
 }
 
 export -f run_one
-export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD
+export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD OFFLOAD_MODE OFFLOAD_EVERY
 
 # Global job queue: ordered seed-first, then n, then mode.
 # A single pool of size $PARALLEL consumes the queue — slots refill

@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
@@ -39,6 +40,88 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 PYTHON = sys.executable
+
+
+class ProgressReporter:
+    """Periodically print a multi-line status block for in-flight tasks.
+
+    Reads meta.json["episodes_completed"] for each running task. Uses ANSI
+    cursor-up to overwrite the previous block, so it doesn't fill the log
+    with new lines. Completion messages are printed above the live block.
+    """
+
+    def __init__(self, interval: float = 15.0):
+        self.interval = interval
+        self._lock = threading.Lock()
+        self._inflight: dict[str, tuple[Path, int]] = {}  # name -> (out_dir, total_eps)
+        self._last_lines = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._tty = sys.stdout.isatty()
+
+    def add(self, name: str, out_dir: Path, total_eps: int) -> None:
+        with self._lock:
+            self._inflight[name] = (out_dir, total_eps)
+            self._print_line(f"▶ {name}: started (target {total_eps} episodes)")
+            self._redraw_locked()
+
+    def remove(self, name: str, final_msg: str) -> None:
+        with self._lock:
+            self._inflight.pop(name, None)
+            self._print_line(final_msg)
+            self._redraw_locked()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        with self._lock:
+            self._clear_locked()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            with self._lock:
+                self._redraw_locked()
+
+    def _read_progress(self, out_dir: Path) -> int | None:
+        try:
+            with open(out_dir / "meta.json") as f:
+                return int(json.load(f).get("episodes_completed", 0))
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def _print_line(self, line: str) -> None:
+        # Caller holds the lock. Clear current block first so the message
+        # appears above the live block.
+        self._clear_locked()
+        print(line, flush=True)
+
+    def _clear_locked(self) -> None:
+        if self._tty and self._last_lines > 0:
+            sys.stdout.write(f"\x1b[{self._last_lines}A\x1b[J")
+            sys.stdout.flush()
+        self._last_lines = 0
+
+    def _redraw_locked(self) -> None:
+        self._clear_locked()
+        if not self._inflight:
+            return
+        lines = []
+        for name, (out_dir, total) in sorted(self._inflight.items()):
+            done = self._read_progress(out_dir)
+            shown = f"{done}/{total}" if done is not None else f"?/{total}"
+            lines.append(f"… {name}: {shown}")
+        if self._tty:
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
+            self._last_lines = len(lines)
+        else:
+            # Non-TTY: just emit a compact one-liner so log files stay clean.
+            print(" | ".join(lines), flush=True)
 
 
 @dataclass(frozen=True)
@@ -160,11 +243,13 @@ def task_already_done(task: TrainTask, args: argparse.Namespace) -> bool:
         return False
 
 
-def run_task(task: TrainTask) -> tuple[str, int, bool]:
+def run_task(task: TrainTask, reporter: "ProgressReporter | None" = None) -> tuple[str, int, bool]:
     """Execute a single training task. Returns (task_name, exit_code, success)."""
     task_name = f"n{task.n}_{task.mode}_seed{task.seed}"
-    
+
     task.out_dir.mkdir(parents=True, exist_ok=True)
+    if reporter is not None:
+        reporter.add(task_name, task.out_dir, task.episodes)
     
     cmd = [
         PYTHON,
@@ -250,19 +335,25 @@ def main():
         return
     
     results = {}
-    with ThreadPoolExecutor(max_workers=args.parallel) as executor:
-        futures = {executor.submit(run_task, task): task for task in pending_tasks}
-        
-        for future in as_completed(futures):
-            task = futures[future]
-            try:
-                task_name, exit_code, success = future.result()
-                results[task_name] = (exit_code, success)
-                status = "✓" if success else "✗"
-                print(f"{status} {task_name}: exit_code={exit_code}")
-            except Exception as e:
-                print(f"✗ Error executing task: {e}")
-                results[task.mode] = (1, False)
+    reporter = ProgressReporter(interval=15.0)
+    reporter.start()
+    try:
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            futures = {executor.submit(run_task, task, reporter): task for task in pending_tasks}
+
+            for future in as_completed(futures):
+                task = futures[future]
+                task_name = f"n{task.n}_{task.mode}_seed{task.seed}"
+                try:
+                    task_name, exit_code, success = future.result()
+                    results[task_name] = (exit_code, success)
+                    status = "✓" if success else "✗"
+                    reporter.remove(task_name, f"{status} {task_name}: exit_code={exit_code}")
+                except Exception as e:
+                    reporter.remove(task_name, f"✗ Error executing task {task_name}: {e}")
+                    results[task.mode] = (1, False)
+    finally:
+        reporter.stop()
     
     # Summary
     print(f"\n{'='*70}")
