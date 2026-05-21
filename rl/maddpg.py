@@ -227,6 +227,9 @@ class MADDPGBase(ABC):
             meta_extra: Optional[dict] = None,
             meta_path: str = "meta.json",
             post_episode_callback: Optional[Callable[[int, bool], None]] = None,
+            orbit_restart: bool = False,
+            orbit_restart_check_ep: int = 250,
+            orbit_restart_max: int = 3,
     ) -> None:
         """
         Resumable training loop with checkpointing.
@@ -236,6 +239,9 @@ class MADDPGBase(ABC):
             train_each (int): Frequency to trigger learning.
             evaluate (bool): If True, only evaluates.
             checkpoint_path (str): Path to save/load training state.
+            orbit_restart (bool): If True, check for orbit-basin convergence at
+                episode orbit_restart_check_ep and reset (actor+critic+targets+
+                buffer+counter) up to orbit_restart_max times.
         """
 
         # === Load previous training state if exists ===
@@ -360,7 +366,13 @@ class MADDPGBase(ABC):
             self.critic_losses = []
             total_tagged = 0
 
-        for i in range(start_episode, n_games):
+        # ---- Orbit-restart tracking ----
+        orbit_component_history = []  # list of np.ndarray shape [9], per-episode sum over agents
+        orbit_tagged_history = []     # list of int per episode
+        orbit_restart_count = 0
+
+        i = start_episode
+        while i < n_games:
 
             offline_necessary= i>0 and total_tagged<self.replay_buffer.batch_size*0.25
 
@@ -378,6 +390,7 @@ class MADDPGBase(ABC):
                 episode_actions = []
             j = 0
             tagged_count=0
+            episode_component_sum = torch.zeros(9, dtype=torch.float32)
             while j < max_steps and not done.all():
                 # print(f'step: {total_steps}')
                 if evaluate:
@@ -389,6 +402,8 @@ class MADDPGBase(ABC):
                 if offline_necessary:
                     episode_actions.append(actions.clone().detach().to(device=device))
                 next_state, next_obs, rewards, next_done = self.env.step_tensor(actions)
+                if orbit_restart:
+                    episode_component_sum += rewards.detach().sum(dim=0).cpu().float()
 
                 tagged = ((~done) & next_done).any().item()
                 if tagged:
@@ -575,6 +590,59 @@ class MADDPGBase(ABC):
                 self.log_episode(episode_id=f'{i}_replayed', env=env)
                 env.delete()
                 del env
+
+            # ---- Orbit-restart check (end of while-body) ----
+            if orbit_restart:
+                orbit_component_history.append(episode_component_sum.numpy())
+                orbit_tagged_history.append(int(tagged_count))
+                if (
+                    (i + 1) == orbit_restart_check_ep
+                    and orbit_restart_count < orbit_restart_max
+                    and self._is_orbit_signature(
+                        orbit_component_history,
+                        orbit_tagged_history,
+                        self.env.num_agents,
+                    )
+                ):
+                    orbit_restart_count += 1
+                    print(
+                        f"ORBIT RESTART {orbit_restart_count}/{orbit_restart_max} "
+                        f"triggered at episode {i + 1}"
+                    )
+                    try:
+                        with open("restart_log.txt", "a") as _rf:
+                            _rf.write(
+                                f"Restarted {orbit_restart_count} times "
+                                f"at episode {i + 1}\n"
+                            )
+                    except Exception as _exc:
+                        print(f"restart_log write failed: {_exc!r}")
+                    self._reset_for_orbit_restart()
+                    # in-memory reset
+                    self.score_history = []
+                    best_score = -float("inf")
+                    episodes_without_improvement = 0
+                    total_steps = 0
+                    total_tagged = 0
+                    self.actor_losses = []
+                    self.critic_losses = []
+                    orbit_component_history = []
+                    orbit_tagged_history = []
+                    # wipe on-disk artifacts so the restart starts clean
+                    for _p in (
+                        checkpoint_path,
+                        "replay_buffer.pkl",
+                        "rewards.csv",
+                        "episode_log.txt",
+                    ):
+                        try:
+                            if os.path.exists(_p):
+                                os.remove(_p)
+                        except Exception as _exc:
+                            print(f"restart wipe of {_p} failed: {_exc!r}")
+                    i = 0
+                    continue
+            i += 1
         # ---- Final meta + offload callback ----
         try:
             peak_gpu = (
@@ -598,6 +666,50 @@ class MADDPGBase(ABC):
             except Exception as exc:
                 print(f"final post_episode_callback failed: {exc!r}", flush=True)
         print("Training complete.")
+    @staticmethod
+    def _is_orbit_signature(component_history, tagged_history, num_agents,
+                            window: int = 100, comp4_min: float = 5.0,
+                            comp8_max: float = -800.0):
+        """Detect the orbit fixed-point: SR=0 over last `window` episodes,
+        nonzero partial reaches, large directional penalty. Distinguishes
+        orbit (HER cannot rescue) from bootstrap-empty (HER can rescue,
+        comp4 mean would be ~0)."""
+        if len(component_history) < window:
+            return False
+        recent_tagged = tagged_history[-window:]
+        sr = sum(1 for t in recent_tagged if t == num_agents) / float(window)
+        if sr > 0.0:
+            return False
+        arr = np.stack(component_history[-window:])  # [window, 9]
+        return bool(arr[:, 3].mean() > comp4_min and arr[:, 7].mean() < comp8_max)
+
+    def _reset_for_orbit_restart(self):
+        """Re-init actor/critic/targets and wipe the replay buffer in place.
+        Uses current (advanced) RNG state, so weights differ from original.
+        No explicit re-seed."""
+        def _reinit(module):
+            for m in module.modules():
+                if hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+        for attr in ("actor", "actor_target", "critic", "critic_target"):
+            net = getattr(self, attr, None)
+            if net is not None:
+                _reinit(net)
+        if hasattr(self, "actor_target") and hasattr(self, "actor"):
+            self.actor_target.load_state_dict(self.actor.state_dict())
+        if hasattr(self, "critic_target") and hasattr(self, "critic"):
+            self.critic_target.load_state_dict(self.critic.state_dict())
+        rb = self.replay_buffer
+        rb.size = 0
+        if hasattr(rb, "current_tagged_idx"):
+            rb.current_tagged_idx = 0
+        if hasattr(rb, "current_notagged_idx"):
+            rb.current_notagged_idx = 0
+        if hasattr(rb, "total_tagged"):
+            rb.total_tagged = 0
+        if hasattr(rb, "idx"):
+            rb.idx = 0
+
     def add_record_to_rb(self, state, obs, actions, rewards, next_state, next_obs, done, tagged=False):
         if self.use_tagged_replay_buffer:
             self.replay_buffer.add(state, obs, actions, rewards, next_state, next_obs, done, tagged=tagged)

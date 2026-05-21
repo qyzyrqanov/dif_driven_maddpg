@@ -54,6 +54,16 @@ def parse_args() -> argparse.Namespace:
         help="Angular velocity cap. Default pi2 — confirmed Z7S value (2026-05-18 evidence).",
     )
     parser.add_argument(
+        "--use_orbit_restart",
+        action="store_true",
+        help="When training via main_loop, enable orbit-basin restart: at "
+             "episode 250 of each attempt, if SR=0 over last 100 episodes "
+             "with orbit signature (mean comp4>5 AND mean comp8<-800), "
+             "reset actor/critic/targets/buffer/counter and start over. "
+             "Max 3 restart events; 4th attempt runs the full episode "
+             "budget without further check.",
+    )
+    parser.add_argument(
         "--use_offline_replay",
         action="store_true",
         help="Use MADDPGBase.main_loop with offline_replay_success (HER-style "
@@ -332,6 +342,7 @@ def main() -> None:
         "v_ang_max": args.v_ang_max,
         "v_ang_max_float": float(v_ang_max),
         "use_offline_replay": bool(args.use_offline_replay),
+        "use_orbit_restart": bool(args.use_orbit_restart),
         "training_loop": "main_loop" if args.use_offline_replay else "train_loop",
         "out_dir": str(out_dir),
         "command_start_iso": start_iso,
@@ -347,7 +358,7 @@ def main() -> None:
 
     try:
         loop_fn = maddpg.main_loop if args.use_offline_replay else maddpg.train_loop
-        loop_fn(
+        loop_kwargs = dict(
             start_training_after=500,
             train_each=100,
             patience=256,
@@ -358,6 +369,14 @@ def main() -> None:
             meta_extra=meta_extra,
             post_episode_callback=post_episode_callback,
         )
+        if args.use_orbit_restart:
+            if not args.use_offline_replay:
+                raise SystemExit(
+                    "--use_orbit_restart requires --use_offline_replay "
+                    "(orbit restart is only implemented in main_loop)."
+                )
+            loop_kwargs["orbit_restart"] = True
+        loop_fn(**loop_kwargs)
     except BaseException as exc:
         update_meta(
             Path("meta.json"),

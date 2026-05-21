@@ -96,6 +96,10 @@ except Exception:
     if [ "${OFFLOAD:-1}" = "0" ]; then
         offload_flag=(--disable_episode_offload)
     fi
+    local restart_flag=()
+    if [ "${USE_ORBIT_RESTART:-0}" = "1" ]; then
+        restart_flag=(--use_orbit_restart)
+    fi
     python run/train_seeded.py \
         --n "$n" --mode "$mode" --seed "$seed" \
         --episodes "$EPISODES" \
@@ -107,6 +111,7 @@ except Exception:
         --offload_mode "$OFFLOAD_MODE" \
         --offload_every "$OFFLOAD_EVERY" \
         "${offload_flag[@]}" \
+        "${restart_flag[@]}" \
         > "$log_file" 2>&1
     local rc=$?
     local t_end elapsed h m s dur
@@ -125,7 +130,7 @@ except Exception:
 }
 
 export -f run_one
-export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD OFFLOAD_MODE OFFLOAD_EVERY
+export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD OFFLOAD_MODE OFFLOAD_EVERY USE_ORBIT_RESTART
 
 # Global job queue: ordered seed-first, then n, then mode.
 # A single pool of size $PARALLEL consumes the queue — slots refill
