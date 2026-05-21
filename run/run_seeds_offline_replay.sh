@@ -168,8 +168,12 @@ def alive(pid):
     except PermissionError: return True
     return True
 last_lines = 0
+first = True
 while True:
-    time.sleep(interval)
+    # First tick: short wait so trainers have time to write their lock + meta.
+    # Subsequent ticks: full interval.
+    time.sleep(5 if first else interval)
+    first = False
     rows = []
     try:
         entries = sorted(os.listdir(runs_root))
