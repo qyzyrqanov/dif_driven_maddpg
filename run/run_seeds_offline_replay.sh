@@ -155,15 +155,22 @@ if [ "$PROGRESS" = "1" ]; then
     python3 - "$ARTIFACT_ROOT/runs" "$PROGRESS_INTERVAL" <<'PYEOF' &
 import json, os, sys, time
 runs_root, interval = sys.argv[1], float(sys.argv[2])
+# Live in-place block goes to the user's terminal, NOT through the pipe
+# that tee is reading — that way the master log stays clean.
+try:
+    tty = open("/dev/tty", "w")
+except OSError:
+    tty = None
 def alive(pid):
     if pid <= 0: return False
     try: os.kill(pid, 0)
     except ProcessLookupError: return False
     except PermissionError: return True
     return True
+last_lines = 0
 while True:
     time.sleep(interval)
-    lines = []
+    rows = []
     try:
         entries = sorted(os.listdir(runs_root))
     except FileNotFoundError:
@@ -186,11 +193,23 @@ while True:
             total = m.get("n_games_target") or m.get("episodes_requested") or "?"
         except Exception:
             pass
-        lines.append(f"  … {name}: {done}/{total}")
-    if lines:
-        print(f"[progress {time.strftime('%H:%M:%S')}] in-flight:", flush=True)
-        for ln in lines:
-            print(ln, flush=True)
+        rows.append(f"  … {name}: {done}/{total}")
+    if tty is not None:
+        # Clear previous block, then redraw header + rows in place.
+        if last_lines:
+            tty.write(f"\x1b[{last_lines}A\x1b[J")
+        header = f"[progress {time.strftime('%H:%M:%S')}] in-flight ({len(rows)}):"
+        tty.write(header + "\n")
+        for r in rows:
+            tty.write(r + "\n")
+        tty.flush()
+        last_lines = 1 + len(rows)
+    else:
+        # No TTY available (e.g., nohup): fall back to one log block per tick.
+        if rows:
+            print(f"[progress {time.strftime('%H:%M:%S')}] in-flight:", flush=True)
+            for r in rows:
+                print(r, flush=True)
 PYEOF
     monitor_pid=$!
     # Make sure the monitor dies with us, even on Ctrl-C.
