@@ -76,17 +76,60 @@ run_one() {
     mkdir -p "$out_dir"
 
     # Skip-if-complete: read episodes_completed from meta.json and bail
-    # before spawning Python (and before any offload sync), so finished
-    # runs cost ~0 seconds.
+    # before spawning Python. With orbit restart enabled, completed runs that
+    # have no recovery signal are allowed through so Python can spend restart
+    # attempt 2/3 on a failed full run.
     if [ -f "$out_dir/meta.json" ]; then
-        local done_ep
-        done_ep=$(python3 -c "import json,sys
+        local complete_action
+        complete_action=$(python3 -c "import json, os, re, sys
+out_dir, episodes, restart_enabled = sys.argv[1], int(sys.argv[2]), sys.argv[3] == '1'
 try:
-    print(int(json.load(open('$out_dir/meta.json')).get('episodes_completed') or 0))
+    meta = json.load(open(os.path.join(out_dir, 'meta.json')))
 except Exception:
-    print(0)" 2>/dev/null)
-        if [ -n "$done_ep" ] && [ "$done_ep" -ge "$EPISODES" ]; then
-            echo "[seed=$seed n=$n mode=$mode] SKIP (already complete: $done_ep/$EPISODES)"
+    print('run 0')
+    raise SystemExit
+done = int(meta.get('episodes_completed') or 0)
+if done < episodes:
+    print(f'run {done}')
+    raise SystemExit
+if not restart_enabled:
+    print(f'skip {done}')
+    raise SystemExit
+restart_count = 0
+try:
+    state = json.load(open(os.path.join(out_dir, 'restart_state.json')))
+    restart_count = int(state.get('restart_count') or 0)
+except Exception:
+    pass
+if restart_count >= 3:
+    print(f'skip {done}')
+    raise SystemExit
+tags = []
+episode_re = re.compile(r'^Episode\\s+(\\d+),\\s+Mean Score:\\s+[-+0-9.eE]+,\\s+Tagged count:\\s+(\\d+)')
+try:
+    with open(os.path.join(out_dir, 'episode_log.txt'), errors='ignore') as f:
+        for line in f:
+            m = episode_re.search(line)
+            if m:
+                tags.append(int(m.group(2)))
+except Exception:
+    print(f'run {done}')
+    raise SystemExit
+if len(tags) >= 200:
+    num_agents = int(meta.get('num_agents') or 0)
+    recent = tags[-100:]
+    long = tags[-200:]
+    sr100 = sum(t >= num_agents for t in recent) / 100.0 if num_agents else 0.0
+    sr200 = sum(t >= num_agents for t in long) / 200.0 if num_agents else 0.0
+    cov100 = sum(min(t, num_agents) / float(num_agents) for t in recent) / 100.0 if num_agents else 0.0
+    cov200 = sum(min(t, num_agents) / float(num_agents) for t in long) / 200.0 if num_agents else 0.0
+    if (sr100 >= 0.10 and sr200 >= 0.05) or (cov100 >= 0.75 and cov200 >= 0.60):
+        print(f'skip {done}')
+        raise SystemExit
+print(f'run {done}')" "$out_dir" "$EPISODES" "${USE_ORBIT_RESTART:-0}" 2>/dev/null)
+        if [ "${complete_action%% *}" = "skip" ]; then
+            local done_ep="${complete_action#* }"
+            echo "[seed=$seed n=$n mode=$mode] SKIP (already complete/recovered: $done_ep/$EPISODES)"
             return 0
         fi
     fi
@@ -123,10 +166,17 @@ except Exception:
     m=$(( (elapsed % 3600) / 60 ))
     s=$(( elapsed % 60 ))
     dur=$(printf "%dh%02dm%02ds" "$h" "$m" "$s")
+    local restart_count
+    restart_count=$(python3 -c "import json, os, sys
+path = os.path.join(sys.argv[1], 'restart_state.json')
+try:
+    print(int(json.load(open(path)).get('restart_count') or 0))
+except Exception:
+    print(0)" "$out_dir" 2>/dev/null)
     if [ $rc -eq 0 ]; then
-        echo "[seed=$seed n=$n mode=$mode] DONE   rc=0  elapsed=$dur"
+        echo "[seed=$seed n=$n mode=$mode] DONE   rc=0  elapsed=$dur restarts=${restart_count:-0}/3"
     else
-        echo "[seed=$seed n=$n mode=$mode] FAILED rc=$rc elapsed=$dur (see $log_file)"
+        echo "[seed=$seed n=$n mode=$mode] FAILED rc=$rc elapsed=$dur restarts=${restart_count:-0}/3 (see $log_file)"
     fi
     return $rc
 }
@@ -200,7 +250,13 @@ while True:
             total = m.get("n_games_target") or m.get("episodes_requested") or "?"
         except Exception:
             pass
-        rows.append(f"  … {name}: {done}/{total}")
+        restarts = 0
+        try:
+            rs = json.load(open(os.path.join(d, "restart_state.json")))
+            restarts = int(rs.get("restart_count") or 0)
+        except Exception:
+            pass
+        rows.append(f"  … {name}: {done}/{total} restarts={restarts}/3")
     if tty is not None:
         # Clear previous block, then redraw header + rows in place.
         if last_lines:

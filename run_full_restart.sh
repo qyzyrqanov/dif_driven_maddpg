@@ -4,9 +4,9 @@
 #   * v_ang_max = pi/2, main_loop / offline_replay (HER) — unchanged
 #   * NEW: orbit-basin restart enabled (--use_orbit_restart)
 #       * First checks at ep 500 of each attempt, then every 50 eps.
-#       * Restart only when last-100 and last-200 strict SR are both <=1%,
-#         no recovery signal is present, and the component signature matches:
-#         mean comp4>5 AND mean comp8<-800.
+#       * Restart when real episodes show no sustained recovery, no meaningful
+#         recent progress, and the component/coverage signature is still bad.
+#         Replayed offline episodes are ignored by the detector.
 #       * Max 3 restart events; 4th attempt runs full episode budget.
 #   * NEW artifact + offload paths (..._restart_v3) so prior restart/v2
 #     sweeps are preserved.
