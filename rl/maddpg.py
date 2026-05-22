@@ -228,7 +228,8 @@ class MADDPGBase(ABC):
             meta_path: str = "meta.json",
             post_episode_callback: Optional[Callable[[int, bool], None]] = None,
             orbit_restart: bool = False,
-            orbit_restart_check_ep: int = 250,
+            orbit_restart_check_ep: int = 600,
+            orbit_restart_check_every: int = 50,
             orbit_restart_max: int = 3,
     ) -> None:
         """
@@ -239,9 +240,10 @@ class MADDPGBase(ABC):
             train_each (int): Frequency to trigger learning.
             evaluate (bool): If True, only evaluates.
             checkpoint_path (str): Path to save/load training state.
-            orbit_restart (bool): If True, check for orbit-basin convergence at
-                episode orbit_restart_check_ep and reset (actor+critic+targets+
-                buffer+counter) up to orbit_restart_max times.
+            orbit_restart (bool): If True, check for a persistent failed
+                motion plateau after orbit_restart_check_ep attempt-local
+                episodes and reset actor+critic+targets+buffer+counter up to
+                orbit_restart_max times.
         """
 
         # === Load previous training state if exists ===
@@ -367,9 +369,35 @@ class MADDPGBase(ABC):
             total_tagged = 0
 
         # ---- Orbit-restart tracking ----
+        # restart_state.json is intentionally not wiped on restart, so the max
+        # restart limit survives process interruption immediately after a reset.
         orbit_component_history = []  # list of np.ndarray shape [9], per-episode sum over agents
         orbit_tagged_history = []     # list of int per episode
         orbit_restart_count = 0
+        orbit_restart_events = []
+        orbit_restart_state_path = "restart_state.json"
+        if orbit_restart and os.path.exists(orbit_restart_state_path):
+            try:
+                with open(orbit_restart_state_path, "r") as f:
+                    restart_state = json.load(f)
+                orbit_restart_count = int(restart_state.get("restart_count", 0))
+                orbit_restart_events = list(restart_state.get("events", []))
+            except Exception as exc:
+                print(f"restart_state restore failed ({exc!r}); starting count at zero.")
+        if resume_pkl is not None:
+            try:
+                _hist = state_dict.get('orbit_component_history')
+                if _hist is not None:
+                    orbit_component_history = [np.asarray(x) for x in _hist]
+                _tag = state_dict.get('orbit_tagged_history')
+                if _tag is not None:
+                    orbit_tagged_history = [int(x) for x in _tag]
+                orbit_restart_count = max(
+                    orbit_restart_count,
+                    int(state_dict.get('orbit_restart_count', 0)),
+                )
+            except Exception as exc:
+                print(f"orbit-restart state restore failed ({exc!r}); starting empty.")
 
         i = start_episode
         while i < n_games:
@@ -466,6 +494,10 @@ class MADDPGBase(ABC):
                     'total_tagged': total_tagged,
                     'actor_losses': self.actor_losses,
                     'critic_losses': self.critic_losses,
+                    'orbit_component_history': orbit_component_history[-256:],
+                    'orbit_tagged_history': orbit_tagged_history[-256:],
+                    'orbit_restart_count': orbit_restart_count,
+                    'orbit_restart_events': orbit_restart_events,
                     'rng': {
                         'python': random.getstate(),
                         'numpy': np.random.get_state(),
@@ -536,6 +568,10 @@ class MADDPGBase(ABC):
                     'total_tagged': total_tagged,
                     'actor_losses': self.actor_losses,
                     'critic_losses': self.critic_losses,
+                    'orbit_component_history': orbit_component_history[-256:],
+                    'orbit_tagged_history': orbit_tagged_history[-256:],
+                    'orbit_restart_count': orbit_restart_count,
+                    'orbit_restart_events': orbit_restart_events,
                     'rng': {
                         'python': random.getstate(),
                         'numpy': np.random.get_state(),
@@ -595,25 +631,48 @@ class MADDPGBase(ABC):
             if orbit_restart:
                 orbit_component_history.append(episode_component_sum.numpy())
                 orbit_tagged_history.append(int(tagged_count))
-                if (
-                    (i + 1) == orbit_restart_check_ep
-                    and orbit_restart_count < orbit_restart_max
-                    and self._is_orbit_signature(
-                        orbit_component_history,
-                        orbit_tagged_history,
-                        self.env.num_agents,
+                attempt_episode = len(orbit_tagged_history)
+                should_check_restart = (
+                    attempt_episode >= orbit_restart_check_ep
+                    and (
+                        orbit_restart_check_every <= 1
+                        or attempt_episode == orbit_restart_check_ep
+                        or (attempt_episode - orbit_restart_check_ep) % orbit_restart_check_every == 0
                     )
+                )
+                restart_diagnostics = self._orbit_restart_diagnostics(
+                    orbit_component_history,
+                    orbit_tagged_history,
+                    self.env.num_agents,
+                )
+                if (
+                    should_check_restart
+                    and orbit_restart_count < orbit_restart_max
+                    and restart_diagnostics["trigger"]
                 ):
                     orbit_restart_count += 1
+                    event = {
+                        "restart_count": orbit_restart_count,
+                        "global_episode": int(i + 1),
+                        "attempt_episode": int(attempt_episode),
+                        **restart_diagnostics,
+                        "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    }
+                    orbit_restart_events.append(event)
                     print(
                         f"ORBIT RESTART {orbit_restart_count}/{orbit_restart_max} "
-                        f"triggered at episode {i + 1}"
+                        f"triggered at global episode {i + 1}, "
+                        f"attempt episode {attempt_episode}: {restart_diagnostics}"
                     )
                     try:
+                        self._save_orbit_restart_state(
+                            orbit_restart_state_path,
+                            orbit_restart_count,
+                            orbit_restart_events,
+                        )
                         with open("restart_log.txt", "a") as _rf:
                             _rf.write(
-                                f"Restarted {orbit_restart_count} times "
-                                f"at episode {i + 1}\n"
+                                json.dumps(event, sort_keys=True) + "\n"
                             )
                     except Exception as _exc:
                         print(f"restart_log write failed: {_exc!r}")
@@ -628,18 +687,48 @@ class MADDPGBase(ABC):
                     self.critic_losses = []
                     orbit_component_history = []
                     orbit_tagged_history = []
-                    # wipe on-disk artifacts so the restart starts clean
-                    for _p in (
+                    # Wipe resume/eval artifacts from the failed attempt. Keep
+                    # restart_state.json and restart_log.txt as audit records.
+                    wipe_paths = [
                         checkpoint_path,
                         "replay_buffer.pkl",
                         "rewards.csv",
                         "episode_log.txt",
-                    ):
+                        "shared_actor.pth",
+                        "shared_actor_target.pth",
+                        "shared_critic.pth",
+                        "shared_critic_target.pth",
+                    ]
+                    wipe_paths.extend(
+                        name for name in os.listdir(".")
+                        if re.match(r"^episode_\d+_training_state\.pkl$", name)
+                    )
+                    wipe_paths.extend(
+                        name for name in os.listdir(".")
+                        if re.match(r"^result\d+(_ablation|_nocoll)?\.csv$", name)
+                    )
+                    for _p in wipe_paths:
                         try:
                             if os.path.exists(_p):
                                 os.remove(_p)
                         except Exception as _exc:
                             print(f"restart wipe of {_p} failed: {_exc!r}")
+                    try:
+                        peak_gpu = (
+                            torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+                        )
+                        self._save_meta_json(
+                            meta_path=meta_path,
+                            meta_extra=meta_extra,
+                            n_games_target=n_games,
+                            episodes_completed=0,
+                            total_steps=0,
+                            total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
+                            peak_gpu_bytes=peak_gpu,
+                            finished=False,
+                        )
+                    except Exception as exc:
+                        print(f"restart meta reset failed: {exc!r}", flush=True)
                     i = 0
                     continue
             i += 1
@@ -667,21 +756,92 @@ class MADDPGBase(ABC):
                 print(f"final post_episode_callback failed: {exc!r}", flush=True)
         print("Training complete.")
     @staticmethod
-    def _is_orbit_signature(component_history, tagged_history, num_agents,
-                            window: int = 100, comp4_min: float = 5.0,
-                            comp8_max: float = -800.0):
-        """Detect the orbit fixed-point: SR=0 over last `window` episodes,
-        nonzero partial reaches, large directional penalty. Distinguishes
-        orbit (HER cannot rescue) from bootstrap-empty (HER can rescue,
-        comp4 mean would be ~0)."""
-        if len(component_history) < window:
-            return False
-        recent_tagged = tagged_history[-window:]
-        sr = sum(1 for t in recent_tagged if t == num_agents) / float(window)
-        if sr > 0.0:
-            return False
-        arr = np.stack(component_history[-window:])  # [window, 9]
-        return bool(arr[:, 3].mean() > comp4_min and arr[:, 7].mean() < comp8_max)
+    def _orbit_restart_diagnostics(
+            component_history,
+            tagged_history,
+            num_agents,
+            short_window: int = 100,
+            long_window: int = 250,
+            max_success_rate: float = 0.01,
+            recovery_success_rate: float = 0.10,
+            recovery_coverage: float = 0.75,
+            comp4_min: float = 5.0,
+            comp8_max: float = -800.0,
+    ):
+        """Return the conservative restart decision and its numeric evidence.
+
+        The detector is deliberately biased against false restarts. Historical
+        runs recovered after 500 episodes, so a reset requires both short and
+        long strict-success windows to remain near zero and no coverage-based
+        recovery signal.
+        """
+        result = {
+            "trigger": False,
+            "reason": "insufficient_history",
+            "short_window": int(short_window),
+            "long_window": int(long_window),
+            "success_rate_100": None,
+            "success_rate_250": None,
+            "coverage_100": None,
+            "coverage_250": None,
+            "comp4_100": None,
+            "comp8_100": None,
+        }
+        if len(component_history) < long_window or len(tagged_history) < long_window:
+            return result
+
+        def _window_stats(window):
+            recent_tagged = tagged_history[-window:]
+            success_rate = sum(1 for t in recent_tagged if t >= num_agents) / float(window)
+            coverage = sum(min(int(t), int(num_agents)) / float(num_agents) for t in recent_tagged) / float(window)
+            return success_rate, coverage
+
+        sr100, cov100 = _window_stats(short_window)
+        sr250, cov250 = _window_stats(long_window)
+        arr100 = np.stack(component_history[-short_window:])
+        comp4_100 = float(arr100[:, 3].mean())
+        comp8_100 = float(arr100[:, 7].mean())
+
+        result.update({
+            "success_rate_100": float(sr100),
+            "success_rate_250": float(sr250),
+            "coverage_100": float(cov100),
+            "coverage_250": float(cov250),
+            "comp4_100": comp4_100,
+            "comp8_100": comp8_100,
+        })
+
+        if sr100 >= recovery_success_rate or cov100 >= recovery_coverage:
+            result["reason"] = "recovery_signal"
+            return result
+        if sr100 > max_success_rate:
+            result["reason"] = "short_success_rate_above_threshold"
+            return result
+        if sr250 > max_success_rate:
+            result["reason"] = "long_success_rate_above_threshold"
+            return result
+        if comp4_100 <= comp4_min:
+            result["reason"] = "comp4_below_threshold"
+            return result
+        if comp8_100 >= comp8_max:
+            result["reason"] = "comp8_above_threshold"
+            return result
+
+        result["trigger"] = True
+        result["reason"] = "persistent_failed_motion_plateau"
+        return result
+
+    @staticmethod
+    def _save_orbit_restart_state(path, restart_count, restart_events):
+        payload = {
+            "restart_count": int(restart_count),
+            "events": restart_events,
+            "updated_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, path)
 
     def _reset_for_orbit_restart(self):
         """Re-init actor/critic/targets and wipe the replay buffer in place.

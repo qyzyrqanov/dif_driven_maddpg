@@ -3,10 +3,13 @@
 #   * Same matrix as run_full.sh (seeds 1..5, n {4,5,6}, modes full/ablation/nocoll)
 #   * v_ang_max = pi/2, main_loop / offline_replay (HER) — unchanged
 #   * NEW: orbit-basin restart enabled (--use_orbit_restart)
-#       * At ep 250 of each attempt, if SR=0 over last 100 eps AND
-#         mean comp4>5 AND mean comp8<-800, reset everything and start over.
+#       * First checks at ep 600 of each attempt, then every 50 eps.
+#       * Restart only when last-100 and last-250 strict SR are both <=1%,
+#         no recovery signal is present, and the component signature matches:
+#         mean comp4>5 AND mean comp8<-800.
 #       * Max 3 restart events; 4th attempt runs full episode budget.
-#   * NEW artifact + offload paths (..._restart) so prior v2 sweep is preserved.
+#   * NEW artifact + offload paths (..._restart_v3) so prior restart/v2
+#     sweeps are preserved.
 #
 # Usage:
 #   bash run_full_restart.sh
@@ -27,9 +30,10 @@ export NS="${NS:-4 5 6}"
 export MODES="${MODES:-full ablation nocoll}"
 export EPISODES="${EPISODES:-1000}"
 export V_ANG_MAX="${V_ANG_MAX:-pi2}"
-export ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_offline_replay_restart_artifacts}"
-export OFFLOAD_ROOT="${OFFLOAD_ROOT:-/media/abz/Z7S/experiments_revision_offline_replay_restart}"
+export ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts}"
+export OFFLOAD_ROOT="${OFFLOAD_ROOT:-/media/abz/Z7S/experiments_revision_offline_replay_restart_v3}"
 export OFFLOAD="${OFFLOAD:-1}"
+export OFFLOAD_MODE="${OFFLOAD_MODE:-end}"
 export FRESH="${FRESH:-0}"
 export LOG_DIR="${LOG_DIR:-$ARTIFACT_ROOT/logs}"
 
@@ -52,13 +56,15 @@ echo "------------------------------------------------------------"
 echo "  seeds        : $SEEDS"
 echo "  Ns           : $NS"
 echo "  modes        : $MODES"
-echo "  episodes     : $EPISODES (per attempt; up to 1750 with restarts)"
+echo "  episodes     : $EPISODES (per attempt; up to 2800 with restarts)"
 echo "  v_ang_max    : $V_ANG_MAX"
 echo "  parallel     : $PARALLEL  (inside each seed)"
 echo "  use_offline_replay: yes (main_loop / HER)"
 echo "  use_orbit_restart : $USE_ORBIT_RESTART (1=on)"
+echo "  restart rule : first attempt-local check at ep 600, then every 50 eps"
 echo "  artifact root: $ARTIFACT_ROOT"
-echo "  offload      : $OFFLOAD  (1=mirror per-episode, 0=disabled)"
+echo "  offload      : $OFFLOAD  (1=mirror after each completed run, 0=disabled)"
+echo "  offload mode : $OFFLOAD_MODE"
 echo "  offload root : $OFFLOAD_ROOT"
 echo "  per-task logs: $LOG_DIR"
 echo "  master log   : $MASTER_LOG"

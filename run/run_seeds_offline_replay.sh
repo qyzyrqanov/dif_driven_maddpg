@@ -6,7 +6,7 @@
 #   * uses main_loop (HER-style offline_replay_success)
 #   * v_ang_max = pi/2 (confirmed Z7S value)
 #   * env walls remain unbounded (already commented out in env.py)
-#   * each run is mirrored to OFFLOAD_ROOT after every saved episode
+#   * by default, each run is mirrored to OFFLOAD_ROOT once, after completion
 #
 # Usage:
 #   bash run/run_seeds_offline_replay.sh                # default seeds 1..5
@@ -23,6 +23,7 @@
 #   OFFLOAD_ROOT   (default /media/abz/Z7S/experiments_revision_offline_replay)
 #   V_ANG_MAX      (default pi2)
 #   LOG_DIR        (default $ARTIFACT_ROOT/logs)
+#   OFFLOAD_MODE   (default end)     end | every | every_k
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -64,6 +65,7 @@ echo "  v_ang_max   : $V_ANG_MAX"
 echo "  parallel    : $PARALLEL  (inside each seed)"
 echo "  artifact    : $ARTIFACT_ROOT"
 echo "  offload     : $OFFLOAD_ROOT"
+echo "  offload mode: $OFFLOAD_MODE"
 echo "  log dir     : $LOG_DIR"
 echo "============================================================"
 
