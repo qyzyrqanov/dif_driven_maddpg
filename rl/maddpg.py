@@ -228,7 +228,7 @@ class MADDPGBase(ABC):
             meta_path: str = "meta.json",
             post_episode_callback: Optional[Callable[[int, bool], None]] = None,
             orbit_restart: bool = False,
-            orbit_restart_check_ep: int = 600,
+            orbit_restart_check_ep: int = 500,
             orbit_restart_check_every: int = 50,
             orbit_restart_max: int = 3,
     ) -> None:
@@ -399,6 +399,78 @@ class MADDPGBase(ABC):
             except Exception as exc:
                 print(f"orbit-restart state restore failed ({exc!r}); starting empty.")
 
+        disk_components, disk_tags = [], []
+        if orbit_restart and start_episode > 0:
+            disk_components, disk_tags = self._load_real_orbit_history_from_disk()
+            if disk_tags:
+                orbit_component_history = disk_components
+                orbit_tagged_history = disk_tags
+        if orbit_restart and start_episode >= orbit_restart_check_ep and orbit_restart_count < orbit_restart_max:
+            resume_diagnostics = self._orbit_restart_diagnostics(
+                disk_components,
+                disk_tags,
+                self.env.num_agents,
+            )
+            print(
+                "Resume restart check "
+                f"attempt_episode={len(disk_tags)} diagnostics={resume_diagnostics}",
+                flush=True,
+            )
+            if resume_diagnostics["trigger"]:
+                orbit_restart_count += 1
+                event = {
+                    "restart_count": orbit_restart_count,
+                    "global_episode": int(start_episode),
+                    "attempt_episode": int(len(disk_tags)),
+                    "resume_check": True,
+                    **resume_diagnostics,
+                    "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }
+                orbit_restart_events.append(event)
+                print(
+                    f"ORBIT RESTART {orbit_restart_count}/{orbit_restart_max} "
+                    f"triggered on resume: {resume_diagnostics}",
+                    flush=True,
+                )
+                try:
+                    self._save_orbit_restart_state(
+                        orbit_restart_state_path,
+                        orbit_restart_count,
+                        orbit_restart_events,
+                    )
+                    with open("restart_log.txt", "a") as _rf:
+                        _rf.write(json.dumps(event, sort_keys=True) + "\n")
+                except Exception as _exc:
+                    print(f"restart_log write failed: {_exc!r}")
+                self._reset_for_orbit_restart()
+                self._wipe_orbit_restart_attempt_artifacts(checkpoint_path)
+                self.score_history = []
+                best_score = -float("inf")
+                episodes_without_improvement = 0
+                total_steps = 0
+                total_tagged = 0
+                self.actor_losses = []
+                self.critic_losses = []
+                orbit_component_history = []
+                orbit_tagged_history = []
+                start_episode = 0
+                try:
+                    peak_gpu = (
+                        torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+                    )
+                    self._save_meta_json(
+                        meta_path=meta_path,
+                        meta_extra=meta_extra,
+                        n_games_target=n_games,
+                        episodes_completed=0,
+                        total_steps=0,
+                        total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
+                        peak_gpu_bytes=peak_gpu,
+                        finished=False,
+                    )
+                except Exception as exc:
+                    print(f"restart meta reset failed: {exc!r}", flush=True)
+
         i = start_episode
         while i < n_games:
 
@@ -470,6 +542,7 @@ class MADDPGBase(ABC):
             self.score_history.append(score)
             avg_score = torch.tensor(self.score_history[-score_avg_window:], device='cpu').float().mean().item()
             total_tagged += tagged_count
+            real_tagged_count = int(tagged_count)
 
             print(f"Episode {i}, Score: {score:.2f}, Avg Score: {avg_score:.2f}, Tagged count: {tagged_count}")
             self.log_episode(episode_id=f'{i}')
@@ -613,7 +686,7 @@ class MADDPGBase(ABC):
 
                 print(f'setting landmark on:{last_positions}')
 
-                replay_trajectory, env,tagged_count, score =self.offline_replay_success(
+                replay_trajectory, env, replayed_tagged_count, score =self.offline_replay_success(
                         agent_actions_list=episode_actions,
                         last_agent_pos=last_positions,
                         init_agent_pos=init_agent_pos,
@@ -622,7 +695,7 @@ class MADDPGBase(ABC):
                         init_agent_headings=init_agent_dir,
                         max_steps=max_steps)
 
-                self.plot_episode_gone_trajectory(np.stack(replay_trajectory), episode=f'{i}_replayed_tagged_{tagged_count}_', env=env)
+                self.plot_episode_gone_trajectory(np.stack(replay_trajectory), episode=f'{i}_replayed_tagged_{replayed_tagged_count}_', env=env)
                 self.log_episode(episode_id=f'{i}_replayed', env=env)
                 env.delete()
                 del env
@@ -630,7 +703,7 @@ class MADDPGBase(ABC):
             # ---- Orbit-restart check (end of while-body) ----
             if orbit_restart:
                 orbit_component_history.append(episode_component_sum.numpy())
-                orbit_tagged_history.append(int(tagged_count))
+                orbit_tagged_history.append(real_tagged_count)
                 attempt_episode = len(orbit_tagged_history)
                 should_check_restart = (
                     attempt_episode >= orbit_restart_check_ep
@@ -687,32 +760,7 @@ class MADDPGBase(ABC):
                     self.critic_losses = []
                     orbit_component_history = []
                     orbit_tagged_history = []
-                    # Wipe resume/eval artifacts from the failed attempt. Keep
-                    # restart_state.json and restart_log.txt as audit records.
-                    wipe_paths = [
-                        checkpoint_path,
-                        "replay_buffer.pkl",
-                        "rewards.csv",
-                        "episode_log.txt",
-                        "shared_actor.pth",
-                        "shared_actor_target.pth",
-                        "shared_critic.pth",
-                        "shared_critic_target.pth",
-                    ]
-                    wipe_paths.extend(
-                        name for name in os.listdir(".")
-                        if re.match(r"^episode_\d+_training_state\.pkl$", name)
-                    )
-                    wipe_paths.extend(
-                        name for name in os.listdir(".")
-                        if re.match(r"^result\d+(_ablation|_nocoll)?\.csv$", name)
-                    )
-                    for _p in wipe_paths:
-                        try:
-                            if os.path.exists(_p):
-                                os.remove(_p)
-                        except Exception as _exc:
-                            print(f"restart wipe of {_p} failed: {_exc!r}")
+                    self._wipe_orbit_restart_attempt_artifacts(checkpoint_path)
                     try:
                         peak_gpu = (
                             torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
@@ -761,7 +809,7 @@ class MADDPGBase(ABC):
             tagged_history,
             num_agents,
             short_window: int = 100,
-            long_window: int = 250,
+            long_window: int = 200,
             max_success_rate: float = 0.01,
             recovery_success_rate: float = 0.10,
             recovery_coverage: float = 0.75,
@@ -781,9 +829,9 @@ class MADDPGBase(ABC):
             "short_window": int(short_window),
             "long_window": int(long_window),
             "success_rate_100": None,
-            "success_rate_250": None,
+            "success_rate_200": None,
             "coverage_100": None,
-            "coverage_250": None,
+            "coverage_200": None,
             "comp4_100": None,
             "comp8_100": None,
         }
@@ -804,9 +852,9 @@ class MADDPGBase(ABC):
 
         result.update({
             "success_rate_100": float(sr100),
-            "success_rate_250": float(sr250),
+            "success_rate_200": float(sr250),
             "coverage_100": float(cov100),
-            "coverage_250": float(cov250),
+            "coverage_200": float(cov250),
             "comp4_100": comp4_100,
             "comp8_100": comp8_100,
         })
@@ -842,6 +890,101 @@ class MADDPGBase(ABC):
         with open(tmp_path, "w") as f:
             json.dump(payload, f, indent=2)
         os.replace(tmp_path, path)
+
+    @staticmethod
+    def _load_real_orbit_history_from_disk():
+        """Rebuild restart detector history from real episodes on disk.
+
+        `episode_log.txt` contains numeric real episode IDs plus replayed /
+        diagnostic IDs such as `123_replayed`; this parser intentionally keeps
+        only numeric IDs so HER replay outcomes cannot satisfy the SR gate.
+        """
+        tag_by_episode = {}
+        log_path = "episode_log.txt"
+        if os.path.exists(log_path):
+            episode_re = re.compile(
+                r"^Episode\s+(\d+),\s+Mean Score:\s+[-+0-9.eE]+,\s+Tagged count:\s+(\d+)"
+            )
+            with open(log_path, "r", errors="ignore") as f:
+                for line in f:
+                    m = episode_re.search(line)
+                    if m:
+                        tag_by_episode[int(m.group(1))] = int(m.group(2))
+
+        csv_path = None
+        if os.path.exists("rewards.csv"):
+            csv_path = "rewards.csv"
+        else:
+            result_csvs = sorted(
+                name for name in os.listdir(".")
+                if re.match(r"^result\d+(_ablation|_nocoll)?\.csv$", name)
+            )
+            if result_csvs:
+                csv_path = result_csvs[0]
+
+        comp_by_episode = {}
+        if csv_path is not None:
+            try:
+                header = pd.read_csv(csv_path, nrows=0).columns.tolist()
+                usecols = ["episode_id"] + [
+                    c for c in header if c.endswith("_comp4") or c.endswith("_comp8")
+                ]
+                comp4_cols = [c for c in usecols if c.endswith("_comp4")]
+                comp8_cols = [c for c in usecols if c.endswith("_comp8")]
+                if comp4_cols and comp8_cols:
+                    for chunk in pd.read_csv(csv_path, usecols=usecols, chunksize=200000):
+                        chunk["_orbit_c4"] = chunk[comp4_cols].sum(axis=1)
+                        chunk["_orbit_c8"] = chunk[comp8_cols].sum(axis=1)
+                        grouped = chunk.groupby("episode_id")[["_orbit_c4", "_orbit_c8"]].sum()
+                        for ep, row in grouped.iterrows():
+                            ep = int(ep)
+                            prev = comp_by_episode.get(ep, (0.0, 0.0))
+                            comp_by_episode[ep] = (
+                                prev[0] + float(row["_orbit_c4"]),
+                                prev[1] + float(row["_orbit_c8"]),
+                            )
+            except Exception as exc:
+                print(f"real restart history load failed from {csv_path}: {exc!r}")
+
+        episodes = sorted(set(tag_by_episode).intersection(comp_by_episode))
+        component_history = []
+        tagged_history = []
+        for ep in episodes:
+            row = np.zeros(9, dtype=np.float32)
+            row[3] = comp_by_episode[ep][0]
+            row[7] = comp_by_episode[ep][1]
+            component_history.append(row)
+            tagged_history.append(tag_by_episode[ep])
+        return component_history, tagged_history
+
+    @staticmethod
+    def _wipe_orbit_restart_attempt_artifacts(checkpoint_path):
+        # Wipe resume/eval artifacts from the failed attempt. Keep
+        # restart_state.json and restart_log.txt as audit records.
+        wipe_paths = [
+            checkpoint_path,
+            "replay_buffer.pkl",
+            "rewards.csv",
+            "episode_log.txt",
+            "shared_actor.pth",
+            "shared_actor_target.pth",
+            "shared_critic.pth",
+            "shared_critic_target.pth",
+        ]
+        wipe_paths.extend(
+            name for name in os.listdir(".")
+            if re.match(r"^episode_\d+_training_state\.pkl$", name)
+        )
+        wipe_paths.extend(
+            name for name in os.listdir(".")
+            if re.match(r"^result\d+(_ablation|_nocoll)?\.csv$", name)
+        )
+        for path in wipe_paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as exc:
+                print(f"restart wipe of {path} failed: {exc!r}")
 
     def _reset_for_orbit_restart(self):
         """Re-init actor/critic/targets and wipe the replay buffer in place.

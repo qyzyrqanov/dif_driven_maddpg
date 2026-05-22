@@ -3,8 +3,8 @@
 #   * Same matrix as run_full.sh (seeds 1..5, n {4,5,6}, modes full/ablation/nocoll)
 #   * v_ang_max = pi/2, main_loop / offline_replay (HER) — unchanged
 #   * NEW: orbit-basin restart enabled (--use_orbit_restart)
-#       * First checks at ep 600 of each attempt, then every 50 eps.
-#       * Restart only when last-100 and last-250 strict SR are both <=1%,
+#       * First checks at ep 500 of each attempt, then every 50 eps.
+#       * Restart only when last-100 and last-200 strict SR are both <=1%,
 #         no recovery signal is present, and the component signature matches:
 #         mean comp4>5 AND mean comp8<-800.
 #       * Max 3 restart events; 4th attempt runs full episode budget.
@@ -56,12 +56,12 @@ echo "------------------------------------------------------------"
 echo "  seeds        : $SEEDS"
 echo "  Ns           : $NS"
 echo "  modes        : $MODES"
-echo "  episodes     : $EPISODES (per attempt; up to 2800 with restarts)"
+echo "  episodes     : $EPISODES (per attempt; up to 2500 with restarts)"
 echo "  v_ang_max    : $V_ANG_MAX"
 echo "  parallel     : $PARALLEL  (inside each seed)"
 echo "  use_offline_replay: yes (main_loop / HER)"
 echo "  use_orbit_restart : $USE_ORBIT_RESTART (1=on)"
-echo "  restart rule : first attempt-local check at ep 600, then every 50 eps"
+echo "  restart rule : first attempt-local check at ep 500, then every 50 eps"
 echo "  artifact root: $ARTIFACT_ROOT"
 echo "  offload      : $OFFLOAD  (1=mirror after each completed run, 0=disabled)"
 echo "  offload mode : $OFFLOAD_MODE"
