@@ -231,9 +231,10 @@ class MADDPGBase(ABC):
             meta_path: str = "meta.json",
             post_episode_callback: Optional[Callable[[int, bool], None]] = None,
             orbit_restart: bool = False,
-            orbit_restart_check_ep: int = 500,
+            orbit_restart_check_ep: int = 250,
             orbit_restart_check_every: int = 50,
             orbit_restart_max: int = 3,
+            orbit_restart_resume_check_ep: int = 500,
     ) -> None:
         """
         Resumable training loop with checkpointing.
@@ -259,6 +260,65 @@ class MADDPGBase(ABC):
             except Exception:
                 resumed_train_seconds = 0.0
         loop_start_wall = time.time()
+        orbit_restart_state_path = "restart_state.json"
+
+        # ---- Orbit-restart helpers (count-once safe) ----
+        def _orbit_meta_reset():
+            try:
+                peak_gpu = torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
+                self._save_meta_json(
+                    meta_path=meta_path, meta_extra=meta_extra, n_games_target=n_games,
+                    episodes_completed=0, total_steps=0,
+                    total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
+                    peak_gpu_bytes=peak_gpu, finished=False,
+                )
+            except Exception as exc:
+                print(f"restart meta reset failed: {exc!r}", flush=True)
+
+        def _orbit_do_restart(event, current_count, events):
+            """Restart counted exactly once: commit the incremented count with
+            restart_pending=True FIRST, then rebuild/wipe/meta-reset, then clear
+            pending. If the process dies before pending is cleared, the next
+            launch finishes the restart without re-incrementing the count."""
+            new_count = int(current_count) + 1
+            event["restart_count"] = new_count
+            events = list(events) + [event]
+            self._save_orbit_restart_state(orbit_restart_state_path, new_count, events, pending=True)
+            try:
+                with open("restart_log.txt", "a") as _rf:
+                    _rf.write(json.dumps(event, sort_keys=True) + "\n")
+            except Exception as _exc:
+                print(f"restart_log write failed: {_exc!r}")
+            self._reset_for_orbit_restart(new_count)
+            self._wipe_orbit_restart_attempt_artifacts(checkpoint_path)
+            _orbit_meta_reset()
+            self._save_orbit_restart_state(orbit_restart_state_path, new_count, events, pending=False)
+            return new_count, events
+
+        def _orbit_finish_pending(current_count, events):
+            print(
+                f"Finishing interrupted orbit restart (restart_count={current_count}) "
+                "without re-incrementing the count.",
+                flush=True,
+            )
+            self._reset_for_orbit_restart(current_count)
+            self._wipe_orbit_restart_attempt_artifacts(checkpoint_path)
+            _orbit_meta_reset()
+            self._save_orbit_restart_state(orbit_restart_state_path, current_count, events, pending=False)
+
+        # ---- Finish any restart interrupted mid-way (count already charged) ----
+        orbit_restart_pending_done = False
+        if orbit_restart and os.path.exists(orbit_restart_state_path):
+            _pend_count, _pend_events = self._load_orbit_restart_state(orbit_restart_state_path)
+            _pending = False
+            try:
+                with open(orbit_restart_state_path, "r") as f:
+                    _pending = bool(json.load(f).get("restart_pending"))
+            except Exception:
+                _pending = False
+            if _pending:
+                _orbit_finish_pending(_pend_count, _pend_events)
+                orbit_restart_pending_done = True
 
         # ---- Early-exit if this run is already complete (meta.json says so) ----
         meta_completed_prior = 0
@@ -269,11 +329,10 @@ class MADDPGBase(ABC):
                 meta_completed_prior = int(_prior_meta.get("episodes_completed") or 0)
             except Exception:
                 meta_completed_prior = 0
+        if orbit_restart_pending_done:
+            meta_completed_prior = 0
         if meta_completed_prior >= n_games:
             if orbit_restart:
-                orbit_restart_count = 0
-                orbit_restart_events = []
-                orbit_restart_state_path = "restart_state.json"
                 orbit_restart_count, orbit_restart_events = self._load_orbit_restart_state(
                     orbit_restart_state_path
                 )
@@ -290,52 +349,24 @@ class MADDPGBase(ABC):
                         flush=True,
                     )
                     if complete_diagnostics["trigger"]:
-                        orbit_restart_count += 1
                         event = {
-                            "restart_count": orbit_restart_count,
                             "global_episode": int(meta_completed_prior),
                             "attempt_episode": int(len(disk_tags)),
                             "completed_check": True,
                             "reset_version": 2,
                             "restart_seed_reset": False,
-                            "rng_advance_draws": int(orbit_restart_count * 997),
+                            "rng_advance_draws": 0,
                             **complete_diagnostics,
                             "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                         }
-                        orbit_restart_events.append(event)
                         print(
-                            f"ORBIT RESTART {orbit_restart_count}/{orbit_restart_max} "
+                            f"ORBIT RESTART {orbit_restart_count + 1}/{orbit_restart_max} "
                             f"triggered after completed failed run: {complete_diagnostics}",
                             flush=True,
                         )
-                        try:
-                            self._save_orbit_restart_state(
-                                orbit_restart_state_path,
-                                orbit_restart_count,
-                                orbit_restart_events,
-                            )
-                            with open("restart_log.txt", "a") as _rf:
-                                _rf.write(json.dumps(event, sort_keys=True) + "\n")
-                        except Exception as _exc:
-                            print(f"restart_log write failed: {_exc!r}")
-                        self._reset_for_orbit_restart(orbit_restart_count)
-                        self._wipe_orbit_restart_attempt_artifacts(checkpoint_path)
-                        try:
-                            peak_gpu = (
-                                torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
-                            )
-                            self._save_meta_json(
-                                meta_path=meta_path,
-                                meta_extra=meta_extra,
-                                n_games_target=n_games,
-                                episodes_completed=0,
-                                total_steps=0,
-                                total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
-                                peak_gpu_bytes=peak_gpu,
-                                finished=False,
-                            )
-                        except Exception as exc:
-                            print(f"restart meta reset failed: {exc!r}", flush=True)
+                        orbit_restart_count, orbit_restart_events = _orbit_do_restart(
+                            event, orbit_restart_count, orbit_restart_events
+                        )
                         meta_completed_prior = 0
                     else:
                         pass
@@ -455,7 +486,6 @@ class MADDPGBase(ABC):
         orbit_tagged_history = []     # list of int per episode
         orbit_restart_count = 0
         orbit_restart_events = []
-        orbit_restart_state_path = "restart_state.json"
         if orbit_restart:
             orbit_restart_count, orbit_restart_events = self._load_orbit_restart_state(
                 orbit_restart_state_path
@@ -481,7 +511,7 @@ class MADDPGBase(ABC):
             if disk_tags:
                 orbit_component_history = disk_components
                 orbit_tagged_history = disk_tags
-        if orbit_restart and start_episode >= orbit_restart_check_ep and orbit_restart_count < orbit_restart_max:
+        if orbit_restart and start_episode >= orbit_restart_resume_check_ep and orbit_restart_count < orbit_restart_max:
             resume_diagnostics = self._orbit_restart_diagnostics(
                 disk_components,
                 disk_tags,
@@ -493,36 +523,24 @@ class MADDPGBase(ABC):
                 flush=True,
             )
             if resume_diagnostics["trigger"]:
-                orbit_restart_count += 1
                 event = {
-                    "restart_count": orbit_restart_count,
                     "global_episode": int(start_episode),
                     "attempt_episode": int(len(disk_tags)),
                     "resume_check": True,
                     "reset_version": 2,
                     "restart_seed_reset": False,
-                    "rng_advance_draws": int(orbit_restart_count * 997),
+                    "rng_advance_draws": 0,
                     **resume_diagnostics,
                     "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 }
-                orbit_restart_events.append(event)
                 print(
-                    f"ORBIT RESTART {orbit_restart_count}/{orbit_restart_max} "
+                    f"ORBIT RESTART {orbit_restart_count + 1}/{orbit_restart_max} "
                     f"triggered on resume: {resume_diagnostics}",
                     flush=True,
                 )
-                try:
-                    self._save_orbit_restart_state(
-                        orbit_restart_state_path,
-                        orbit_restart_count,
-                        orbit_restart_events,
-                    )
-                    with open("restart_log.txt", "a") as _rf:
-                        _rf.write(json.dumps(event, sort_keys=True) + "\n")
-                except Exception as _exc:
-                    print(f"restart_log write failed: {_exc!r}")
-                self._reset_for_orbit_restart(orbit_restart_count)
-                self._wipe_orbit_restart_attempt_artifacts(checkpoint_path)
+                orbit_restart_count, orbit_restart_events = _orbit_do_restart(
+                    event, orbit_restart_count, orbit_restart_events
+                )
                 self.score_history = []
                 best_score = -float("inf")
                 episodes_without_improvement = 0
@@ -533,22 +551,6 @@ class MADDPGBase(ABC):
                 orbit_component_history = []
                 orbit_tagged_history = []
                 start_episode = 0
-                try:
-                    peak_gpu = (
-                        torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
-                    )
-                    self._save_meta_json(
-                        meta_path=meta_path,
-                        meta_extra=meta_extra,
-                        n_games_target=n_games,
-                        episodes_completed=0,
-                        total_steps=0,
-                        total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
-                        peak_gpu_bytes=peak_gpu,
-                        finished=False,
-                    )
-                except Exception as exc:
-                    print(f"restart meta reset failed: {exc!r}", flush=True)
 
         i = start_episode
         while i < n_games:
@@ -802,37 +804,24 @@ class MADDPGBase(ABC):
                     and orbit_restart_count < orbit_restart_max
                     and restart_diagnostics["trigger"]
                 ):
-                    orbit_restart_count += 1
                     event = {
-                        "restart_count": orbit_restart_count,
                         "global_episode": int(i + 1),
                         "attempt_episode": int(attempt_episode),
                         "reset_version": 2,
                         "restart_seed_reset": False,
-                        "rng_advance_draws": int(orbit_restart_count * 997),
+                        "rng_advance_draws": 0,
                         **restart_diagnostics,
                         "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     }
-                    orbit_restart_events.append(event)
                     print(
-                        f"ORBIT RESTART {orbit_restart_count}/{orbit_restart_max} "
+                        f"ORBIT RESTART {orbit_restart_count + 1}/{orbit_restart_max} "
                         f"triggered at global episode {i + 1}, "
                         f"attempt episode {attempt_episode}: {restart_diagnostics}"
                     )
-                    try:
-                        self._save_orbit_restart_state(
-                            orbit_restart_state_path,
-                            orbit_restart_count,
-                            orbit_restart_events,
-                        )
-                        with open("restart_log.txt", "a") as _rf:
-                            _rf.write(
-                                json.dumps(event, sort_keys=True) + "\n"
-                            )
-                    except Exception as _exc:
-                        print(f"restart_log write failed: {_exc!r}")
-                    self._reset_for_orbit_restart(orbit_restart_count)
-                    # in-memory reset
+                    orbit_restart_count, orbit_restart_events = _orbit_do_restart(
+                        event, orbit_restart_count, orbit_restart_events
+                    )
+                    # in-memory loop-state reset
                     self.score_history = []
                     best_score = -float("inf")
                     episodes_without_improvement = 0
@@ -842,23 +831,6 @@ class MADDPGBase(ABC):
                     self.critic_losses = []
                     orbit_component_history = []
                     orbit_tagged_history = []
-                    self._wipe_orbit_restart_attempt_artifacts(checkpoint_path)
-                    try:
-                        peak_gpu = (
-                            torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0
-                        )
-                        self._save_meta_json(
-                            meta_path=meta_path,
-                            meta_extra=meta_extra,
-                            n_games_target=n_games,
-                            episodes_completed=0,
-                            total_steps=0,
-                            total_train_seconds=resumed_train_seconds + (time.time() - loop_start_wall),
-                            peak_gpu_bytes=peak_gpu,
-                            finished=False,
-                        )
-                    except Exception as exc:
-                        print(f"restart meta reset failed: {exc!r}", flush=True)
                     i = 0
                     continue
             i += 1
@@ -892,22 +864,16 @@ class MADDPGBase(ABC):
             num_agents,
             short_window: int = 100,
             long_window: int = 200,
-            recovery_success_rate: float = 0.10,
-            recovery_long_success_rate: float = 0.05,
-            recovery_coverage: float = 0.75,
-            recovery_long_coverage: float = 0.60,
-            failed_coverage: float = 0.20,
-            progress_success_gain: float = 0.01,
-            progress_coverage_gain: float = 0.05,
-            comp4_min: float = 5.0,
-            comp8_max: float = -800.0,
+            restart_success_rate: float = 0.01,
+            restart_coverage: float = 0.40,
     ):
-        """Return the conservative restart decision and its numeric evidence.
+        """Return the early restart decision and its numeric evidence.
 
-        The detector is deliberately biased against false restarts. A reset
-        requires bad real-episode evidence and no sustained recovery signal;
-        isolated lucky successes below the recovery thresholds do not block a
-        restart.
+        Empirically (over all finished revision runs) a run that will never
+        succeed sits at SR <= 1% AND coverage < 40% over the last 100 real
+        episodes, while every eventual success has crossed one of those
+        thresholds by attempt episode ~250 (the slowest observed first traction
+        is at episode 231). So the rule is simply: no traction == restart.
         """
         result = {
             "trigger": False,
@@ -918,81 +884,37 @@ class MADDPGBase(ABC):
             "success_rate_200": None,
             "coverage_100": None,
             "coverage_200": None,
-            "prev_success_rate_100": None,
-            "prev_coverage_100": None,
-            "success_gain_100": None,
-            "coverage_gain_100": None,
-            "recovery_success_threshold": float(recovery_success_rate),
-            "recovery_long_success_threshold": float(recovery_long_success_rate),
-            "recovery_coverage_threshold": float(recovery_coverage),
-            "recovery_long_coverage_threshold": float(recovery_long_coverage),
+            "restart_success_threshold": float(restart_success_rate),
+            "restart_coverage_threshold": float(restart_coverage),
             "comp4_100": None,
             "comp8_100": None,
         }
-        if len(component_history) < long_window or len(tagged_history) < long_window:
+        if len(tagged_history) < short_window:
             return result
 
         def _window_stats(window):
             recent_tagged = tagged_history[-window:]
-            success_rate = sum(1 for t in recent_tagged if t >= num_agents) / float(window)
-            coverage = sum(min(int(t), int(num_agents)) / float(num_agents) for t in recent_tagged) / float(window)
+            success_rate = sum(1 for t in recent_tagged if t >= num_agents) / float(len(recent_tagged))
+            coverage = sum(min(int(t), int(num_agents)) / float(num_agents) for t in recent_tagged) / float(len(recent_tagged))
             return success_rate, coverage
 
         sr100, cov100 = _window_stats(short_window)
-        sr250, cov250 = _window_stats(long_window)
-        previous_tagged = tagged_history[-long_window:-short_window]
-        prev_sr100 = sum(1 for t in previous_tagged if t >= num_agents) / float(short_window)
-        prev_cov100 = sum(
-            min(int(t), int(num_agents)) / float(num_agents) for t in previous_tagged
-        ) / float(short_window)
-        success_gain_100 = sr100 - prev_sr100
-        coverage_gain_100 = cov100 - prev_cov100
-        arr100 = np.stack(component_history[-short_window:])
-        comp4_100 = float(arr100[:, 3].mean())
-        comp8_100 = float(arr100[:, 7].mean())
+        result["success_rate_100"] = float(sr100)
+        result["coverage_100"] = float(cov100)
+        if len(tagged_history) >= long_window:
+            sr200, cov200 = _window_stats(long_window)
+            result["success_rate_200"] = float(sr200)
+            result["coverage_200"] = float(cov200)
+        if component_history is not None and len(component_history) >= short_window:
+            arr100 = np.stack(component_history[-short_window:])
+            result["comp4_100"] = float(arr100[:, 3].mean())
+            result["comp8_100"] = float(arr100[:, 7].mean())
 
-        result.update({
-            "success_rate_100": float(sr100),
-            "success_rate_200": float(sr250),
-            "coverage_100": float(cov100),
-            "coverage_200": float(cov250),
-            "prev_success_rate_100": float(prev_sr100),
-            "prev_coverage_100": float(prev_cov100),
-            "success_gain_100": float(success_gain_100),
-            "coverage_gain_100": float(coverage_gain_100),
-            "comp4_100": comp4_100,
-            "comp8_100": comp8_100,
-        })
-
-        sustained_success = (
-            sr100 >= recovery_success_rate
-            and sr250 >= recovery_long_success_rate
-        )
-        sustained_coverage = (
-            cov100 >= recovery_coverage
-            and cov250 >= recovery_long_coverage
-        )
-        if sustained_success or sustained_coverage:
-            result["reason"] = "recovery_signal"
-            return result
-        if comp8_100 >= comp8_max:
-            result["reason"] = "comp8_above_threshold"
-            return result
-        if (
-            success_gain_100 >= progress_success_gain
-            or coverage_gain_100 >= progress_coverage_gain
-        ):
-            result["reason"] = "progress_signal"
-            return result
-        if comp4_100 <= comp4_min and cov250 >= failed_coverage:
-            result["reason"] = "comp4_below_threshold"
-            return result
-        if comp4_100 <= comp4_min:
-            result["reason"] = "persistent_failed_low_coverage"
+        if sr100 <= restart_success_rate and cov100 < restart_coverage:
+            result["trigger"] = True
+            result["reason"] = "no_traction"
         else:
-            result["reason"] = "persistent_failed_motion_plateau"
-
-        result["trigger"] = True
+            result["reason"] = "has_traction"
         return result
 
     @staticmethod
@@ -1044,10 +966,11 @@ class MADDPGBase(ABC):
             return 0, []
 
     @staticmethod
-    def _save_orbit_restart_state(path, restart_count, restart_events):
+    def _save_orbit_restart_state(path, restart_count, restart_events, pending=False):
         payload = {
             "restart_count": int(restart_count),
             "events": restart_events,
+            "restart_pending": bool(pending),
             "updated_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
         tmp_path = f"{path}.tmp"

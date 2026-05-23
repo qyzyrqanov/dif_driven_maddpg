@@ -115,15 +115,14 @@ try:
 except Exception:
     print(f'run {done}')
     raise SystemExit
-if len(tags) >= 200:
+if len(tags) >= 100:
     num_agents = int(meta.get('num_agents') or 0)
     recent = tags[-100:]
-    long = tags[-200:]
     sr100 = sum(t >= num_agents for t in recent) / 100.0 if num_agents else 0.0
-    sr200 = sum(t >= num_agents for t in long) / 200.0 if num_agents else 0.0
     cov100 = sum(min(t, num_agents) / float(num_agents) for t in recent) / 100.0 if num_agents else 0.0
-    cov200 = sum(min(t, num_agents) / float(num_agents) for t in long) / 200.0 if num_agents else 0.0
-    if (sr100 >= 0.10 and sr200 >= 0.05) or (cov100 >= 0.75 and cov200 >= 0.60):
+    # Completed run has traction (success/recovery) -> leave complete, skip.
+    # Failing (SR<=1% AND coverage<40%) -> allow Python to restart it.
+    if not (sr100 <= 0.01 and cov100 < 0.40):
         print(f'skip {done}')
         raise SystemExit
 print(f'run {done}')" "$out_dir" "$EPISODES" "${USE_ORBIT_RESTART:-0}" 2>/dev/null)
