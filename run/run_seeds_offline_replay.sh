@@ -33,7 +33,7 @@ cd "$REPO_ROOT"
 source "$REPO_ROOT/.venvLin/bin/activate"
 export PYTHONPATH="$REPO_ROOT"
 
-PARALLEL="${PARALLEL:-5}"
+PARALLEL="${PARALLEL:-3}"   # training tasks in parallel; offload runs as an independent +1 worker
 SEEDS="${SEEDS:-1 2 3 4 5}"
 MODES="${MODES:-full ablation nocoll}"
 NS="${NS:-4 5 6}"
@@ -45,8 +45,12 @@ OFFLOAD="${OFFLOAD:-1}"  # 1 = mirror to OFFLOAD_ROOT, 0 = disable
 OFFLOAD_MODE="${OFFLOAD_MODE:-end}"   # end | every | every_k — when to mirror to USB
 OFFLOAD_EVERY="${OFFLOAD_EVERY:-10}"  # only used when OFFLOAD_MODE=every_k
 LOG_DIR="${LOG_DIR:-$ARTIFACT_ROOT/logs}"
+# FIFO queue consumed by a single independent offload worker (the +1 slot).
+# Completed runs are enqueued here; training never blocks on USB offload.
+OFFLOAD_QUEUE="${OFFLOAD_QUEUE:-$ARTIFACT_ROOT/.offload_queue}"
 
-mkdir -p "$ARTIFACT_ROOT/runs" "$LOG_DIR"
+mkdir -p "$ARTIFACT_ROOT/runs" "$LOG_DIR" "$OFFLOAD_QUEUE"
+rm -f "$OFFLOAD_QUEUE/.done"   # clear stale shutdown flag from a prior run
 
 # Verify offload root exists / is writable (best effort warning, not fatal)
 if [ ! -d "$OFFLOAD_ROOT" ]; then
@@ -136,10 +140,10 @@ print(f'run {done}')" "$out_dir" "$EPISODES" "${USE_ORBIT_RESTART:-0}" 2>/dev/nu
     local t_start
     t_start=$(date +%s)
     echo "[seed=$seed n=$n mode=$mode] START  $(date -Iseconds)  -> $log_file"
-    local offload_flag=()
-    if [ "${OFFLOAD:-1}" = "0" ]; then
-        offload_flag=(--disable_episode_offload)
-    fi
+    # Offload is decoupled from training: the trainer never mirrors to USB
+    # in-process (it would block the slot). A completed run is enqueued below
+    # and mirrored by the independent offload worker.
+    local offload_flag=(--disable_episode_offload)
     local restart_flag=()
     if [ "${USE_ORBIT_RESTART:-0}" = "1" ]; then
         restart_flag=(--use_orbit_restart)
@@ -174,6 +178,12 @@ except Exception:
     print(0)" "$out_dir" 2>/dev/null)
     if [ $rc -eq 0 ]; then
         echo "[seed=$seed n=$n mode=$mode] DONE   rc=0  elapsed=$dur restarts=${restart_count:-0}/3"
+        if [ "${OFFLOAD:-1}" = "1" ]; then
+            # Enqueue this completed run for the independent offload worker.
+            # FIFO ordering via nanosecond timestamp prefix.
+            printf '%s\n' "$out_dir" > "$OFFLOAD_QUEUE/$(date +%s%N)_n${n}_${mode}_seed${seed}.job"
+            echo "[seed=$seed n=$n mode=$mode] ENQUEUED offload -> $OFFLOAD_QUEUE"
+        fi
     else
         echo "[seed=$seed n=$n mode=$mode] FAILED rc=$rc elapsed=$dur restarts=${restart_count:-0}/3 (see $log_file)"
     fi
@@ -181,7 +191,7 @@ except Exception:
 }
 
 export -f run_one
-export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD OFFLOAD_MODE OFFLOAD_EVERY USE_ORBIT_RESTART
+export ARTIFACT_ROOT OFFLOAD_ROOT LOG_DIR EPISODES V_ANG_MAX OFFLOAD OFFLOAD_MODE OFFLOAD_EVERY USE_ORBIT_RESTART OFFLOAD_QUEUE
 
 # Global job queue: ordered seed-first, then n, then mode.
 # A single pool of size $PARALLEL consumes the queue — slots refill
@@ -274,21 +284,69 @@ while True:
                 print(r, flush=True)
 PYEOF
     monitor_pid=$!
-    # Make sure the monitor dies with us, even on Ctrl-C.
-    trap 'kill "$monitor_pid" 2>/dev/null' EXIT INT TERM
 fi
 
+# ---- Independent offload worker (the +1 slot) ----
+# Drains $OFFLOAD_QUEUE one job at a time, so at most ONE offload runs at once
+# and training slots are never blocked by USB I/O. Exits once the launcher
+# signals .done AND the queue is empty.
+worker_pid=""
+if [ "${OFFLOAD:-1}" = "1" ]; then
+    (
+        while true; do
+            job="$(ls -1 "$OFFLOAD_QUEUE"/*.job 2>/dev/null | sort | head -n1)"
+            if [ -z "$job" ]; then
+                if [ -f "$OFFLOAD_QUEUE/.done" ]; then
+                    # Final drain: re-scan in case a job slipped in just now.
+                    job="$(ls -1 "$OFFLOAD_QUEUE"/*.job 2>/dev/null | sort | head -n1)"
+                    [ -z "$job" ] && break
+                else
+                    sleep 5
+                    continue
+                fi
+            fi
+            run_dir="$(cat "$job" 2>/dev/null)"
+            if [ -n "$run_dir" ] && [ -d "$run_dir" ]; then
+                echo "[offload] mirroring $run_dir"
+                if python "$REPO_ROOT/tools/offload_artifacts.py" \
+                        --run_dir "$run_dir" \
+                        --source_root "$ARTIFACT_ROOT" \
+                        --target_root "$OFFLOAD_ROOT" \
+                        --keep_local_result_csv --include_running --quiet_progress; then
+                    echo "[offload] done $run_dir"
+                else
+                    echo "[offload] FAILED $run_dir (left dequeued; rerun launcher to retry)"
+                fi
+            fi
+            rm -f "$job"
+        done
+        echo "[offload] worker exiting (queue drained)"
+    ) &
+    worker_pid=$!
+fi
+
+# Kill background helpers with us, even on Ctrl-C. Unquoted so empty pids vanish.
+trap 'kill $monitor_pid $worker_pid 2>/dev/null' EXIT INT TERM
+
 while IFS=$'\t' read -r s n m; do
-    while [ "$(jobs -rp | grep -vx "${monitor_pid:-x}" | wc -l)" -ge "$PARALLEL" ]; do
+    while [ "$(jobs -rp | grep -vx -e "${monitor_pid:-x}" -e "${worker_pid:-y}" | wc -l)" -ge "$PARALLEL" ]; do
         sleep 2
     done
     run_one "$s" "$n" "$m" &
 done < "$jobs_file"
 
-# Wait only for run_one workers, not the monitor.
-for pid in $(jobs -rp | grep -vx "${monitor_pid:-x}"); do
+# Wait only for training workers (exclude monitor + offload worker).
+for pid in $(jobs -rp | grep -vx -e "${monitor_pid:-x}" -e "${worker_pid:-y}"); do
     wait "$pid" 2>/dev/null
 done
+
+# All training finished: tell the offload worker to drain remaining jobs & exit.
+if [ -n "$worker_pid" ]; then
+    : > "$OFFLOAD_QUEUE/.done"
+    echo "All training complete; waiting for offload queue to drain..."
+    wait "$worker_pid" 2>/dev/null
+    rm -f "$OFFLOAD_QUEUE/.done"
+fi
 if [ -n "$monitor_pid" ]; then
     kill "$monitor_pid" 2>/dev/null
     wait "$monitor_pid" 2>/dev/null
