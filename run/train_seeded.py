@@ -303,12 +303,32 @@ def make_episode_offload_callback(
     return callback
 
 
+def read_restart_count(out_dir: Path) -> int:
+    """Read restart_count from a prior orbit-restart state, if any."""
+    try:
+        with open(out_dir / "restart_state.json") as f:
+            return int(json.load(f).get("restart_count") or 0)
+    except Exception:
+        return 0
+
+
 def main() -> None:
     args = parse_args()
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    set_seeds(args.seed)
+    # On a restart relaunch (this run already triggered >=1 orbit restart) we do
+    # NOT re-seed: re-seeding would reproduce attempt 1's init exactly. Skipping
+    # set_seeds lets the fresh rebuild diverge — same config, different stream.
+    restart_count = read_restart_count(out_dir)
+    if restart_count > 0:
+        print(
+            f"Orbit-restart relaunch (restart_count={restart_count}): "
+            "skipping set_seeds so this attempt diverges from the seeded attempt.",
+            flush=True,
+        )
+    else:
+        set_seeds(args.seed)
 
     start_time = time.time()
     start_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")

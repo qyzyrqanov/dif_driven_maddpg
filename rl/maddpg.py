@@ -59,20 +59,23 @@ class MADDPGBase(ABC):
         """
         self.env=env
         self.use_tagged_replay_buffer=use_tagged_replay_buffer
-        if use_tagged_replay_buffer:
-            self.replay_buffer=tagged_replay_buffer.ReplayBuffer(obs_dim=env.obs_dim, state_dim=env.state_dim, action_dim=env.action_dim,
-                                        device=device, num_agents=env.num_agents, replay_buffer_size=replay_buffer_size, batch_size=batch_size)
-        else:
-            self.replay_buffer = replay_buffer.ReplayBuffer(obs_dim=env.obs_dim, state_dim=env.state_dim,
-                                                                   action_dim=env.action_dim,
-                                                                   device=device, num_agents=env.num_agents,
-                                                                   replay_buffer_size=replay_buffer_size,
-                                                                   batch_size=batch_size)
+        self._rb_kwargs = dict(
+            obs_dim=env.obs_dim, state_dim=env.state_dim, action_dim=env.action_dim,
+            device=device, num_agents=env.num_agents,
+            replay_buffer_size=replay_buffer_size, batch_size=batch_size,
+        )
+        self.replay_buffer = self._build_replay_buffer()
         self.obs_dim=env.obs_dim
         self.state_dim=env.state_dim
 
         self.device=device
         self.reward_scales = torch.tensor(reward_scales, dtype=torch.float32, device=self.device)
+
+    def _build_replay_buffer(self):
+        """Construct a fresh, empty replay buffer matching this run's config."""
+        if self.use_tagged_replay_buffer:
+            return tagged_replay_buffer.ReplayBuffer(**self._rb_kwargs)
+        return replay_buffer.ReplayBuffer(**self._rb_kwargs)
 
     @staticmethod
     @torch.no_grad()
@@ -1148,47 +1151,22 @@ class MADDPGBase(ABC):
                 print(f"restart wipe of {path} failed: {exc!r}")
 
     def _reset_for_orbit_restart(self, restart_count: int = 0):
-        """Re-init actor/critic/targets and wipe the replay buffer in place.
-        Keeps the experiment seed identity, but advances the RNG stream by the
-        restart attempt so repeated completed-run relaunches do not recreate
-        the exact same scratch weights."""
-        restart_count = max(0, int(restart_count))
-        burn = restart_count * 997
-        if burn:
-            print(
-                f"Orbit restart reset: restart_count={restart_count}, "
-                f"advancing existing RNG stream by {burn} draws; "
-                "experiment seed is unchanged.",
-                flush=True,
-            )
-            for _ in range(burn):
-                random.random()
-            np.random.random(burn)
-            torch.rand(burn)
-            if torch.cuda.is_available():
-                torch.rand(burn, device=self.device)
-        def _reinit(module):
-            for m in module.modules():
-                if hasattr(m, "reset_parameters"):
-                    m.reset_parameters()
-        for attr in ("actor", "actor_target", "critic", "critic_target"):
-            net = getattr(self, attr, None)
-            if net is not None:
-                _reinit(net)
-        if hasattr(self, "actor_target") and hasattr(self, "actor"):
-            self.actor_target.load_state_dict(self.actor.state_dict())
-        if hasattr(self, "critic_target") and hasattr(self, "critic"):
-            self.critic_target.load_state_dict(self.critic.state_dict())
-        rb = self.replay_buffer
-        rb.size = 0
-        if hasattr(rb, "current_tagged_idx"):
-            rb.current_tagged_idx = 0
-        if hasattr(rb, "current_notagged_idx"):
-            rb.current_notagged_idx = 0
-        if hasattr(rb, "total_tagged"):
-            rb.total_tagged = 0
-        if hasattr(rb, "idx"):
-            rb.idx = 0
+        """Start a genuinely fresh attempt: rebuild networks, optimizers, and
+        the replay buffer from scratch with the same config. The old objects
+        (including stale Adam optimizer state and buffer contents) become
+        unreferenced and are garbage-collected. The RNG stream is NOT
+        re-seeded, so the fresh init diverges from the prior attempt."""
+        print(
+            f"Orbit restart reset: restart_count={int(restart_count)}; "
+            "rebuilding fresh networks + optimizers + replay buffer with the "
+            "same config. Seed is not reset, so this attempt diverges.",
+            flush=True,
+        )
+        if hasattr(self, "_build_networks"):
+            self._build_networks()
+        self.replay_buffer = self._build_replay_buffer()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def add_record_to_rb(self, state, obs, actions, rewards, next_state, next_obs, done, tagged=False):
         if self.use_tagged_replay_buffer:
@@ -1877,12 +1855,18 @@ class MADDPGSharedActorCritic(MADDPGBase):
             self.actor_target (SimpleActor): Target actor network.
         """
         super().__init__(env,reward_scales=reward_scales, device=device, batch_size = batch_size, replay_buffer_size = replay_buffer_size,use_tagged_replay_buffer=use_tagged_replay_buffer)
+        self._build_networks()
+
+    def _build_networks(self):
+        """Construct fresh actor/critic networks, their optimizers, and targets.
+        Called from __init__ and on orbit restart to get a genuinely fresh
+        attempt (drops stale Adam optimizer state)."""
         critic_input_dim, critic_output_dim=self._critic_dim()
         self.critic=SharedCritic(input_dim=critic_input_dim, output_dim=critic_output_dim, device=self.device, chckpnt_file='shared_critic.pth')
         self.critic_target=SharedCritic(input_dim=critic_input_dim, output_dim=critic_output_dim,   device=self.device, chckpnt_file='shared_critic_target.pth')
         self.critic_target.load_state_dict(self.critic.state_dict())
-        self.actor=SimpleActor(env.obs_dim, env.action_dim, device=device, chckpnt_file='shared_actor.pth')
-        self.actor_target=SimpleActor(env.obs_dim, env.action_dim, device=device, chckpnt_file='shared_actor_target.pth')
+        self.actor=SimpleActor(self.env.obs_dim, self.env.action_dim, device=self.device, chckpnt_file='shared_actor.pth')
+        self.actor_target=SimpleActor(self.env.obs_dim, self.env.action_dim, device=self.device, chckpnt_file='shared_actor_target.pth')
         self.actor_target.load_state_dict(self.actor.state_dict())
     def _critic_dim(self):
         return self.env.state_dim +  self.env.num_agents * self.env.action_dim, self.env.num_agents
