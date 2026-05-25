@@ -52,3 +52,7 @@ CLAUDE.md
 find_crop.py
 find_crops.sh
 plotter.ipynb
+
+# Local light experiment logs (DR copy in media); runnable by res/revision_final_results.ipynb
+revision_logs/
+nohup.out
