@@ -64,6 +64,41 @@ def parse_args() -> argparse.Namespace:
              "budget without further check.",
     )
     parser.add_argument(
+        "--orbit_restart_check_ep",
+        type=int,
+        default=250,
+        help="First attempt-local episode at which the orbit-restart check "
+             "runs; re-checked every 50 episodes up to the budget. Default 250.",
+    )
+    parser.add_argument(
+        "--orbit_restart_resume_check_ep",
+        type=int,
+        default=500,
+        help="One-time startup restart check episode for an already-far-along "
+             "resumed attempt. Default 500.",
+    )
+    parser.add_argument(
+        "--orbit_restart_max",
+        type=int,
+        default=3,
+        help="Max restart events; the (max+1)-th attempt runs the full episode "
+             "budget with no early restart. Default 3.",
+    )
+    parser.add_argument(
+        "--orbit_restart_sr_threshold",
+        type=float,
+        default=0.01,
+        help="Restart if last-100 success rate <= this AND coverage < "
+             "--orbit_restart_cov_threshold. Default 0.01 (no-traction rule).",
+    )
+    parser.add_argument(
+        "--orbit_restart_cov_threshold",
+        type=float,
+        default=0.40,
+        help="Coverage guard for the restart rule (see --orbit_restart_sr_threshold). "
+             "Default 0.40.",
+    )
+    parser.add_argument(
         "--use_offline_replay",
         action="store_true",
         help="Use MADDPGBase.main_loop with offline_replay_success (HER-style "
@@ -396,6 +431,11 @@ def main() -> None:
                     "(orbit restart is only implemented in main_loop)."
                 )
             loop_kwargs["orbit_restart"] = True
+            loop_kwargs["orbit_restart_check_ep"] = args.orbit_restart_check_ep
+            loop_kwargs["orbit_restart_resume_check_ep"] = args.orbit_restart_resume_check_ep
+            loop_kwargs["orbit_restart_max"] = args.orbit_restart_max
+            loop_kwargs["orbit_restart_sr_threshold"] = args.orbit_restart_sr_threshold
+            loop_kwargs["orbit_restart_cov_threshold"] = args.orbit_restart_cov_threshold
         loop_fn(**loop_kwargs)
     except BaseException as exc:
         update_meta(

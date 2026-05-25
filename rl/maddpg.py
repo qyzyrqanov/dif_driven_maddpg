@@ -235,6 +235,8 @@ class MADDPGBase(ABC):
             orbit_restart_check_every: int = 50,
             orbit_restart_max: int = 3,
             orbit_restart_resume_check_ep: int = 500,
+            orbit_restart_sr_threshold: float = 0.01,
+            orbit_restart_cov_threshold: float = 0.40,
     ) -> None:
         """
         Resumable training loop with checkpointing.
@@ -342,6 +344,8 @@ class MADDPGBase(ABC):
                         disk_components,
                         disk_tags,
                         self.env.num_agents,
+                        restart_success_rate=orbit_restart_sr_threshold,
+                        restart_coverage=orbit_restart_cov_threshold,
                     )
                     print(
                         "Completed-run restart check "
@@ -516,6 +520,8 @@ class MADDPGBase(ABC):
                 disk_components,
                 disk_tags,
                 self.env.num_agents,
+                restart_success_rate=orbit_restart_sr_threshold,
+                restart_coverage=orbit_restart_cov_threshold,
             )
             print(
                 "Resume restart check "
@@ -798,6 +804,8 @@ class MADDPGBase(ABC):
                     orbit_component_history,
                     orbit_tagged_history,
                     self.env.num_agents,
+                    restart_success_rate=orbit_restart_sr_threshold,
+                    restart_coverage=orbit_restart_cov_threshold,
                 )
                 if (
                     should_check_restart

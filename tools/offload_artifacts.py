@@ -286,7 +286,18 @@ def copy_tree_verified(
                 success = True  # vanished — treat as skip
                 break
             dst_file.parent.mkdir(parents=True, exist_ok=True)
-            if not dst_file.exists() or dst_file.stat().st_size != src_size:
+            # Re-copy when the destination is missing, a different size, OR
+            # older than the source. The size check alone misses fixed-size
+            # files that change content every save (e.g. *.pth checkpoints and
+            # replay_buffer.pkl) — those would otherwise never be refreshed on
+            # a second offload of the same run dir. copy2 preserves mtime, so
+            # after a copy dst.mtime == src.mtime and we won't re-copy needlessly.
+            need_copy = (
+                not dst_file.exists()
+                or dst_file.stat().st_size != src_size
+                or src_file.stat().st_mtime_ns > dst_file.stat().st_mtime_ns
+            )
+            if need_copy:
                 shutil.copy2(src_file, dst_file)
             try:
                 if dst_file.stat().st_size == src_size:
