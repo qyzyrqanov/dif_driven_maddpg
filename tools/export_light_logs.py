@@ -42,11 +42,31 @@ def num_agents(run_dir, name):
     return int(name[1:name.index("_")])
 
 
+def _from_episode_log(run_dir):
+    """Fallback when result*.csv is missing: parse episode_log.txt real episodes.
+    `Tagged count` = agents done at episode end -> done_count. Components are
+    unavailable from the log, so comp1..9 are left NaN for this run."""
+    import re
+    p = os.path.join(run_dir, "episode_log.txt")
+    if not os.path.exists(p):
+        return None
+    pat = re.compile(r"^Episode (\d+),.*Tagged count:\s*(\d+)", re.M)
+    rows = [(int(e), int(t)) for e, t in pat.findall(open(p).read())]
+    if not rows:
+        return None
+    out = pd.DataFrame(rows, columns=["episode_id", "done_count"]).drop_duplicates("episode_id")
+    out = out.sort_values("episode_id").reset_index(drop=True)
+    for j in range(1, 10):
+        out[f"comp{j}"] = np.nan
+    return out
+
+
 def distil_run(run_dir, n):
     """Return per-episode summary DataFrame (episode_id, done_count, comp1..9)."""
-    cands = glob.glob(os.path.join(run_dir, "result*.csv"))
+    cands = glob.glob(os.path.join(run_dir, "result*.csv")) or \
+            glob.glob(os.path.join(run_dir, "rewards.csv"))
     if not cands:
-        return None
+        return _from_episode_log(run_dir)
     f = max(cands, key=os.path.getmtime)
     comp_cols = [f"agent{a}_comp{j}" for a in range(n) for j in range(1, 10)]
     use = set(["episode_id", "done_count"] + comp_cols)

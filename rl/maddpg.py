@@ -1823,10 +1823,15 @@ class MADDPGSharedActorCritic(MADDPGBase):
 
             next_q = self.critic_target(next_state, joint_next_action)  # [B, 1]
 
-            masked_reward = reward * active_mask  # zero reward for done agents
-            total_reward = masked_reward.sum(dim=1, keepdim=True)  # [B, 1]
+            # Keep every agent's reward — the reached-goal bonus is earned on the
+            # exact step an agent crosses into `done` (stored done is post-step),
+            # so masking reward by active_mask would erase the primary learning
+            # signal. Only the bootstrap is masked, on episode-level termination
+            # (all agents done), matching IDDPGWithoutS's terminal handling.
+            total_reward = reward.sum(dim=1, keepdim=True)  # [B, 1]
+            episode_not_done = (~done).all(dim=1, keepdim=True).float()  # [B, 1]
 
-            y = total_reward + gamma * next_q  # TD target
+            y = total_reward + gamma * next_q * episode_not_done  # TD target
 
         joint_action = action.view(B, N * act_dim)
         q_pred = self.critic(state, joint_action)  # [B, 1]
@@ -2090,6 +2095,102 @@ class MADDPGSharedActorCriticIndependent(MADDPGSharedActorCritic):
             self.actor.optimizer.step()
 
         # Unfreeze critic params
+        for p in self.critic.parameters():
+            p.requires_grad_(True)
+
+        # === Soft Target Updates ===
+        self.update_params_vectorized(self.critic, self.critic_target, tau)
+        self.update_params_vectorized(self.actor, self.actor_target, tau)
+
+        # === Return metrics ===
+        if actor_loss_total is None:
+            return torch.stack(critic_losses).mean().item(), None
+        return torch.stack(critic_losses).mean().item(), torch.stack(actor_losses).mean().item()
+
+
+class MADDPGSharedActorCriticIndependentObs(MADDPGSharedActorCriticIndependent):
+    """Centralized-critic MADDPG that conditions on the concatenation of all
+    agents' per-agent observations (index order) instead of the globally
+    distance-sorted ``state`` vector.
+
+    Rationale: the env's ``state_tensor`` sorts agents by distance to origin
+    (``ag_order``), but the joint action / per-agent reward / done are stored in
+    raw agent-index order and the permutation is NOT recorded in the replay
+    buffer. Feeding the sorted state alongside index-ordered actions leaves the
+    critic head ``i`` unable to reliably bind to agent ``i`` (a moving
+    permutation), which made the parent class train only on lucky seeds.
+
+    Both per-agent obs (already index-ordered in the buffer) and the joint
+    action are in the same consistent order here, so head ``i`` ↔ agent ``i`` is
+    exact. This is textbook CTDE and needs no buffer-schema change; existing
+    pickles remain valid. Inherits the per-agent reward target, terminal masking,
+    ``is_valid`` filter, and differentiable per-agent actor update from the
+    parent — only the critic *input* changes (state -> concat of obs)."""
+
+    def _critic_dim(self):
+        return self.env.num_agents * (self.env.obs_dim + self.env.action_dim), self.env.num_agents
+
+    def learn(self, buffer=None):
+        buffer = buffer or self.replay_buffer
+        obs, next_obs, state, next_state, action, reward_components, done = buffer.sample()
+        reward = self.reward_from_rb(reward_components)  # shape: [B, N]
+        B, N, act_dim = action.shape
+
+        # Centralized critic conditions on concatenated per-agent obs (index
+        # order) rather than the sorted global state, so the head<->agent and
+        # action-slot<->agent bindings are all consistent.
+        joint_obs = obs.reshape(B, N * self.env.obs_dim)
+        joint_next_obs = next_obs.reshape(B, N * self.env.obs_dim)
+
+        critic_losses = []
+        actor_losses = []
+
+        # === Critic update (single step) ===
+        with torch.no_grad():
+            next_actions_all = self.actor_target(next_obs)  # [B, N, act_dim]
+            joint_next_action = next_actions_all.reshape(B, N * act_dim)
+            next_q = self.critic_target(joint_next_obs, joint_next_action)  # [B, N]
+
+            not_done = (~done).float()  # [B, N]
+            y = reward + gamma * not_done * next_q  # [B, N]
+
+        joint_action = action.reshape(B, N * act_dim)
+        q_pred = self.critic(joint_obs, joint_action)  # [B, N]
+
+        is_valid = (~done) | (reward.abs() > 1e-5)  # [B, N]
+        critic_loss = F.mse_loss(q_pred[is_valid], y[is_valid])
+        self.critic.optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic.optimizer.step()
+        critic_losses.append(critic_loss.detach())
+
+        # === Actor update (accumulate per-agent loss; single backward) ===
+        pred_actions_all = self.actor(obs)  # [B, N, act_dim] (live graph)
+
+        for p in self.critic.parameters():
+            p.requires_grad_(False)
+
+        actor_loss_total = None
+        for i in range(N):
+            mask = is_valid[:, i]
+            if mask.sum() == 0:
+                continue
+
+            pred_actions_i = pred_actions_all.detach().clone()  # [B, N, act_dim]
+            pred_actions_i[:, i] = pred_actions_all[:, i]  # keep i-th path live
+            joint_pred_actions = pred_actions_i.reshape(B, N * act_dim)
+
+            q_vals_i = self.critic(joint_obs, joint_pred_actions)[:, i]  # [B]
+            loss_i = -q_vals_i[mask].mean()
+
+            actor_losses.append(loss_i.detach())
+            actor_loss_total = loss_i if actor_loss_total is None else (actor_loss_total + loss_i)
+
+        if actor_loss_total is not None:
+            self.actor.optimizer.zero_grad()
+            actor_loss_total.backward()
+            self.actor.optimizer.step()
+
         for p in self.critic.parameters():
             p.requires_grad_(True)
 

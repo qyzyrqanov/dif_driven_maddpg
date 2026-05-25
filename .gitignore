@@ -56,3 +56,5 @@ plotter.ipynb
 # Local light experiment logs (DR copy in media); runnable by res/revision_final_results.ipynb
 revision_logs/
 nohup.out
+checkpoints_local/
+*_run.log

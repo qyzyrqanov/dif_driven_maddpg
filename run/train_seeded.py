@@ -21,7 +21,17 @@ if str(REPO_ROOT) not in sys.path:
 from custom_envs.diff_driven.gym_env.centered_paralelenv.env import (  # noqa: E402
     DiffDriveParallelEnvDone,
 )
-from rl.maddpg import IDDPGWithoutS  # noqa: E402
+from rl.maddpg import (  # noqa: E402
+    IDDPGWithoutS,
+    MADDPGSharedActorCritic,
+    MADDPGSharedActorCriticIndependentObs,
+)
+
+ALGORITHMS = {
+    "iddpg_without_s": IDDPGWithoutS,        # canonical: shared decentralized critic (obs_i, action_i)
+    "maddpg": MADDPGSharedActorCritic,       # Lowe-2017-style: joint-action centralized critic
+    "maddpg_obs": MADDPGSharedActorCriticIndependentObs,  # CTDE: per-agent reward + concat-obs critic (fixes A/B/C)
+}
 from tools.offload_artifacts import ensure_target_root, offload_run_dir  # noqa: E402
 
 
@@ -43,6 +53,14 @@ def parse_args() -> argparse.Namespace:
         description="Run one canonical IDDPGWithoutS training configuration."
     )
     parser.add_argument("--n", type=int, choices=[4, 5, 6], required=True)
+    parser.add_argument(
+        "--algorithm",
+        choices=sorted(ALGORITHMS),
+        default="iddpg_without_s",
+        help="Which algorithm to train. 'iddpg_without_s' (default) is the "
+             "canonical shared decentralized critic; 'maddpg' is the "
+             "Lowe-2017-style joint-action centralized-critic baseline.",
+    )
     parser.add_argument("--mode", choices=sorted(SCALES), required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--episodes", type=int, default=1000)
@@ -382,7 +400,8 @@ def main() -> None:
         num_obstacles=0,
         v_ang_max=v_ang_max,
     )
-    maddpg = IDDPGWithoutS(
+    algo_cls = ALGORITHMS[args.algorithm]
+    maddpg = algo_cls(
         env,
         reward_scales=SCALES[args.mode],
         batch_size=128,
@@ -393,6 +412,7 @@ def main() -> None:
         "n": args.n,
         "mode": args.mode,
         "seed": args.seed,
+        "algorithm": args.algorithm,
         "episodes_requested": args.episodes,
         "v_ang_max": args.v_ang_max,
         "v_ang_max_float": float(v_ang_max),

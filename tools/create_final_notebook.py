@@ -152,28 +152,77 @@ else:
             ax.set_title(f"n={n}"); ax.set_xlabel("episode"); ax.grid(alpha=0.3); ax.set_ylim(-2, 105)
         axes[0].set_ylabel(f"{title} (%)"); axes[0].legend()
         fig.suptitle(f"{title} ± SD across {len(SEEDS)} seeds"); fig.tight_layout()
-        out = os.path.join(RES, f"revision_rolling_{metric}_full_valid.png")
-        fig.savefig(out, dpi=130, bbox_inches="tight"); print("saved", out)
+        out = os.path.join(RES, f"revision_rolling_{metric}_full_valid")
+        fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+        fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
     plt.show()
 """)
 
-    md("""## §4 Baseline comparison bar chart  *(R1 baselines, R2#13)*
+    md("""## §4 Baseline comparison bar charts  *(R1 baselines, R2#13)*
 
-Final-window success rate per n, grouped by reward mode. Error bars ±1 SD.""")
+Final-window **success rate** and **coverage** per n, grouped by reward mode.
+Both metrics plotted (one chart each). Error bars ±1 SD across seeds.""")
 
     code("""
-fig, ax = plt.subplots(figsize=(9, 5))
-width = 0.26; x = np.arange(len(NS))
-for i, mode in enumerate(MODES):
-    means = [summary[(summary.n == n) & (summary["mode"] == mode)].SR_mean.values[0] for n in NS]
-    sds   = [summary[(summary.n == n) & (summary["mode"] == mode)].SR_sd.values[0] for n in NS]
-    ax.bar(x + (i - 1) * width, means, width, yerr=sds, capsize=4, color=MODE_COLOR[mode], label=mode)
-ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS])
-ax.set_ylabel("last-200 success rate (%)"); ax.set_ylim(0, 105)
-ax.set_title("Success rate by team size and reward mode (±SD across seeds)")
-ax.legend(); ax.grid(axis="y", alpha=0.3)
-out = os.path.join(RES, "revision_baseline_success_valid.png")
-fig.savefig(out, dpi=130, bbox_inches="tight"); print("saved", out); plt.show()
+for metric, mcol, scol, title, fname in [
+        ("success rate", "SR_mean", "SR_sd", "Success rate", "revision_baseline_success_valid"),
+        ("coverage",     "cov_mean", "cov_sd", "Coverage",     "revision_baseline_coverage_valid")]:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    width = 0.26; x = np.arange(len(NS))
+    for i, mode in enumerate(MODES):
+        means = [summary[(summary.n == n) & (summary["mode"] == mode)][mcol].values[0] for n in NS]
+        sds   = [summary[(summary.n == n) & (summary["mode"] == mode)][scol].values[0] for n in NS]
+        ax.bar(x + (i - 1) * width, means, width, yerr=sds, capsize=4, color=MODE_COLOR[mode], label=mode)
+    ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS])
+    ax.set_ylabel(f"last-200 {metric} (%)"); ax.set_ylim(0, 105)
+    ax.set_title(f"{title} by team size and reward mode (±SD across seeds)")
+    ax.legend(); ax.grid(axis="y", alpha=0.3)
+    out = os.path.join(RES, fname)
+    fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+    fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+plt.show()
+""")
+
+    md("""## §4b MADDPG within-environment baseline  *(R1 #2 / #17)*
+
+Lowe-2017-style joint-action **centralized-critic** MADDPG, run through the same
+pipeline (offline relabeling, full reward, π/2) **without** the orbit-restart
+controller, on the matched seeds {1,2,3}. **Results to be added after the run**
+(`bash run/run_maddpg_baseline.sh`, then
+`python tools/export_light_logs.py --artifact_root <maddpg_root> --no_media`).
+
+This cell auto-loads the MADDPG `run_details.csv` when available (set
+`MADDPG_ROOT`, or place it at `revision_logs_maddpg/`), and prints a
+matched-seed comparison vs the proposed method; otherwise it shows a placeholder.""")
+
+    code("""
+maddpg_root = os.environ.get("MADDPG_ROOT") or (ROOT.rstrip("/") + "_maddpg")
+maddpg_csv = os.path.join(maddpg_root, "run_details.csv")
+if not os.path.exists(maddpg_csv):
+    print("MADDPG baseline results NOT YET AVAILABLE — to be added after the run.")
+    print("  1) bash run/run_maddpg_baseline.sh        (CONFIRM=1)")
+    print("  2) python tools/export_light_logs.py --artifact_root <maddpg_artifact_root> --no_media \\\\")
+    print("       --local_logs", maddpg_root)
+    print("  3) re-run this cell.")
+else:
+    mad = pd.read_csv(maddpg_csv)
+    mad["mode"] = "MADDPG"      # label for the comparison
+    shared = sorted(set(mad.seed) & set(per_run.seed))
+    print(f"MADDPG loaded ({len(mad)} runs); comparing on shared seeds {shared} vs proposed (full).")
+    ours = per_run[(per_run["mode"] == "full") & (per_run.seed.isin(shared))]
+    mads = mad[mad.seed.isin(shared)]
+    cmp = []
+    for n in NS:
+        o = ours[ours.n == n].SR; m = mads[mads.n == n].SR
+        oc = ours[ours.n == n].coverage; mc = mads[mads.n == n].coverage
+        cmp.append(dict(n=n,
+                        proposed_SR=f"{o.mean():.1f} ± {o.std(ddof=0):.1f}",
+                        MADDPG_SR=f"{m.mean():.1f} ± {m.std(ddof=0):.1f}" if len(m) else "—",
+                        proposed_cov=f"{oc.mean():.1f} ± {oc.std(ddof=0):.1f}",
+                        MADDPG_cov=f"{mc.mean():.1f} ± {mc.std(ddof=0):.1f}" if len(mc) else "—",
+                        proposed_per_seed=", ".join(f"{s}:{v}" for s,v in zip(ours[ours.n==n].seed,o)),
+                        MADDPG_per_seed=", ".join(f"{s}:{v}" for s,v in zip(mads[mads.n==n].seed,m))))
+    display(pd.DataFrame(cmp))
 """)
 
     md("""## §5 Coverage vs success scatter — partial-credit view
@@ -190,37 +239,133 @@ for mode in MODES:
 ax.plot([0, 100], [0, 100], "k--", alpha=0.3)
 ax.set_xlabel("coverage (%)"); ax.set_ylabel("success rate (%)")
 ax.set_title("Per-run coverage vs full-team success"); ax.legend(); ax.grid(alpha=0.3)
+out = os.path.join(RES, "revision_coverage_vs_success_scatter")
+fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
 plt.show()
+""")
+
+    md("""## §5b Deterministic eval: generalization (env20→env25) + heuristic oracle  *(R2#15, R1#2)*
+
+Noise-free policy rollouts (eval seed 42, 200 episodes) of the trained actors,
+evaluated at the **training arena (env_size=20)** and a **25%-larger unseen arena
+(env_size=25)**, plus a non-learning **Hungarian + P-controller oracle** at π/2.
+
+Two metrics are reported throughout:
+- **SR** — full-team success (all agents reached a goal).
+- **coverage** — PARTIAL-success metric (mean fraction of agents that covered a
+  landmark). Where SR dips, coverage stays high → the policy is *one agent short*,
+  not failing. This is the honest reading of the high-variance cells.
+
+Loads `revision_logs/eval/eval_summary.csv` + `eval_per_run.csv`
+(produced by `tools/aggregate_eval.py`); self-skips with a note if absent.""")
+
+    code("""
+EVAL_DIR = os.path.join(ROOT, "eval")
+eval_summary_csv = os.path.join(EVAL_DIR, "eval_summary.csv")
+eval_per_run_csv = os.path.join(EVAL_DIR, "eval_per_run.csv")
+HAS_EVAL = os.path.exists(eval_summary_csv) and os.path.exists(eval_per_run_csv)
+if not HAS_EVAL:
+    print("Eval results NOT available — run:")
+    print("  python tools/aggregate_eval.py --eval_dir <eval_dir> --out_dir revision_logs/eval")
+else:
+    ev = pd.read_csv(eval_summary_csv)
+    evr = pd.read_csv(eval_per_run_csv)
+    ev["SR (mean±SD)"]  = ev.SR_mean.map("{:.1f}".format)  + " ± " + ev.SR_sd.map("{:.1f}".format)
+    ev["cov (mean±SD)"] = ev.cov_mean.map("{:.1f}".format) + " ± " + ev.cov_sd.map("{:.1f}".format)
+
+    print("=== Learned policy — generalization (SR = full success, coverage = partial) ===")
+    pol = ev[ev.kind == "policy"].sort_values(["env", "n"])
+    display(pol[["env", "n", "SR (mean±SD)", "cov (mean±SD)",
+                 "compT_mean", "coll_mean", "path_mean", "SR_per_seed"]])
+
+    print("=== Heuristic oracle (Hungarian + P-controller, π/2, env20) ===")
+    heu = ev[ev.kind == "heuristic"].sort_values("n")
+    display(heu[["env", "n", "SR (mean±SD)", "cov (mean±SD)",
+                 "compT_mean", "coll_mean", "path_mean"]])
+
+    ev.to_csv(os.path.join(RES, "revision_eval_summary.csv"), index=False)
+""")
+
+    code("""
+if HAS_EVAL:
+    # Grouped bars: SR and coverage per n, env20 vs env25, with the oracle ceiling.
+    pol = ev[ev.kind == "policy"]
+    heu = ev[ev.kind == "heuristic"]
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    width = 0.35
+    for ax, (mcol, scol, title) in zip(axes, [
+            ("SR_mean", "SR_sd", "Success rate (full-team)"),
+            ("cov_mean", "cov_sd", "Coverage (partial credit)")]):
+        x = np.arange(len(NS))
+        for k, (env, off, c) in enumerate([(20, -width/2, "#1f77b4"), (25, width/2, "#d62728")]):
+            sub = pol[pol.env == env].set_index("n").reindex(NS)
+            ax.bar(x + off, sub[mcol], width, yerr=sub[scol], capsize=4,
+                   label=f"learned env{env}", color=c, alpha=0.85)
+        ho = heu.set_index("n").reindex(NS)[mcol]
+        ax.plot(x, ho.values, "k*--", ms=14, label="heuristic oracle (env20)")
+        ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS])
+        ax.set_ylim(0, 105); ax.set_ylabel("%"); ax.set_title(title)
+        ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=9)
+    fig.suptitle("Deterministic eval: generalization to a larger arena + oracle ceiling")
+    out = os.path.join(RES, "revision_eval_generalization")
+    fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+    fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+    plt.show()
+""")
+
+    code("""
+if HAS_EVAL:
+    # Partial-credit highlight: SR vs coverage per run (env25), gap = shortfall.
+    fig, ax = plt.subplots(figsize=(7, 6))
+    for env, c in [(20, "#1f77b4"), (25, "#d62728")]:
+        sub = evr[(evr.kind == "policy") & (evr.env == env)]
+        ax.scatter(sub.coverage, sub.SR, color=c, s=60, alpha=0.8, label=f"env{env}")
+    ax.plot([0, 100], [0, 100], "k--", alpha=0.3, label="SR = coverage")
+    ax.set_xlabel("coverage % (partial)"); ax.set_ylabel("success rate % (full)")
+    ax.set_title("Eval: per-run coverage vs success — points below the line are 'one agent short'")
+    ax.legend(); ax.grid(alpha=0.3)
+    out = os.path.join(RES, "revision_eval_cov_vs_sr")
+    fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+    fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+    plt.show()
 """)
 
     md("""## §6 Seed-level statistics  *(R2#14 / plan §2.5)*
 
 Kruskal–Wallis across modes per n; Mann–Whitney full-vs-baselines (pooled);
-bootstrap 95% CI of mean SR per cell (per-seed resampling).""")
+bootstrap 95% CI of mean per cell (per-seed resampling). **Run for both
+success rate and coverage.**""")
 
     code("""
 try:
     from scipy import stats
-    print("Kruskal-Wallis across modes (per n):")
-    for n in NS:
-        groups = [per_run[(per_run.n == n) & (per_run["mode"] == m)].SR.values for m in MODES]
-        if all(len(g) > 0 for g in groups):
-            H, p = stats.kruskal(*groups)
-            print(f"  n={n}: H={H:.3f}, p={p:.3f}")
-    print("\\nMann-Whitney U (pooled over n):")
-    for a, b in [("full", "nocoll"), ("full", "ablation")]:
-        va = per_run[per_run["mode"] == a].SR.values
-        vb = per_run[per_run["mode"] == b].SR.values
-        U, p = stats.mannwhitneyu(va, vb, alternative="two-sided")
-        print(f"  {a} vs {b}: U={U:.1f}, p={p:.3f}  (median {np.median(va):.1f} vs {np.median(vb):.1f})")
-    print("\\nBootstrap 95% CI of mean SR per cell:")
-    for n in NS:
-        for mode in MODES:
-            v = per_run[(per_run.n == n) & (per_run["mode"] == mode)].SR.values
-            if len(v) < 2: continue
-            res = stats.bootstrap((v,), np.mean, confidence_level=0.95, n_resamples=5000)
-            lo, hi = res.confidence_interval
-            print(f"  n={n} {mode:<9}: mean {v.mean():5.1f}  CI [{lo:5.1f}, {hi:5.1f}]")
+    for METRIC in ["SR", "coverage"]:
+        col = per_run[METRIC]
+        print("=" * 64)
+        print(f"METRIC: {METRIC}")
+        print("=" * 64)
+        print("Kruskal-Wallis across modes (per n):")
+        for n in NS:
+            groups = [per_run[(per_run.n == n) & (per_run["mode"] == m)][METRIC].values for m in MODES]
+            if all(len(g) > 0 for g in groups):
+                H, p = stats.kruskal(*groups)
+                print(f"  n={n}: H={H:.3f}, p={p:.3f}")
+        print("\\nMann-Whitney U (pooled over n):")
+        for a, b in [("full", "nocoll"), ("full", "ablation")]:
+            va = per_run[per_run["mode"] == a][METRIC].values
+            vb = per_run[per_run["mode"] == b][METRIC].values
+            U, p = stats.mannwhitneyu(va, vb, alternative="two-sided")
+            print(f"  {a} vs {b}: U={U:.1f}, p={p:.3f}  (median {np.median(va):.1f} vs {np.median(vb):.1f})")
+        print(f"\\nBootstrap 95% CI of mean {METRIC} per cell:")
+        for n in NS:
+            for mode in MODES:
+                v = per_run[(per_run.n == n) & (per_run["mode"] == mode)][METRIC].values
+                if len(v) < 2: continue
+                res = stats.bootstrap((v,), np.mean, confidence_level=0.95, n_resamples=5000)
+                lo, hi = res.confidence_interval
+                print(f"  n={n} {mode:<9}: mean {v.mean():5.1f}  CI [{lo:5.1f}, {hi:5.1f}]")
+        print()
 except ImportError:
     print("scipy not installed — skipping (pip install scipy)")
 """)
@@ -306,14 +451,49 @@ display(pd.DataFrame(brk).T)
 
     md("""## §10 Gaps & follow-ups (not in this batch)
 
+- **MADDPG baseline (R1 #2/#17)** — fixed CTDE variant (`maddpg_obs`) relaunched;
+  see §4b. Results to be added after the run completes.
 - **R2#10 scalability 8–10 agents** — not run; narrow claims to n∈{4,5,6}.
-- **R2#15 generalization to other env sizes** — env_size=20 only; run
-  `run/eval_policy.py --env_size 25` on the 45 actor checkpoints (in the artifact
-  root, not the light logs) for the generalization table.
-- **R2#6/#11 obstacles** — num_obstacles=0; acknowledge as limitation.
-- **Heuristic oracle baseline** — regenerate at π/2 via `run/eval_hungarian_p.py`.
+- **R2#15 generalization to other env sizes** — DONE; see §5b (env20→env25).
+- **R2#6/#11 obstacles** — num_obstacles=0; acknowledge as limitation. NOTE: the
+  heuristic oracle (§5b) dominates in this obstacle-free setting, so an
+  obstacle eval is the cleanest way to show where the learned policy wins.
+- **Heuristic oracle baseline** — DONE; see §5b (π/2, env20).
 - **Text-only:** R2#1,#7,#8,#9,#12,#16–19; R1 cross-references. See
   `.ai/experiment_conclusions.md` §8–9, §11.
+""")
+
+    md("""## §11 Key quantitative findings (read off the cells above)
+
+This notebook is the **authoritative source for every number, table, and figure**
+used in the revision. Summary of what the cells above establish:
+
+- **Headline (§2):** 45 runs (5 seeds × n∈{4,5,6} × {full, ablation, nocoll}).
+  All three modes ≈ **93% mean** last-200 success; **coverage ≥ 96%** in every
+  cell. Per-seed values are shown — two sub-50% outliers (n4_nocoll seed5,
+  n5_full seed1) must be reported, not hidden.
+- **Baselines / significance (§4, §6):** mode differences are **not statistically
+  significant** (Kruskal–Wallis p>0.05 each n; Mann–Whitney full-vs-nocoll p≈0.93,
+  full-vs-ablation p≈0.24). → report the method as *robust to the shaping choice*,
+  NOT as "full shaping beats the baselines."
+- **Partial credit (§5):** coverage stays high even where full-team SR dips →
+  report coverage alongside SR.
+- **Generalization (§5b, R2#15):** deterministic policy holds up on a 25%-larger
+  unseen arena — n4 92.8→84.1, n6 89.9→71.4 SR — degrading gracefully (completion
+  time / path length grow ~50–80%). Coverage stays ≥85% in every cell even where
+  SR dips (n5 env25 SR 55.7 but cov 85.0; n6 env25 SR 71.4 but cov 95.0) → the
+  partial-credit metric shows the policy is "one agent short," not failing.
+- **Heuristic oracle (§5b, R1#2):** Hungarian + P-controller hits 100% in ~10
+  steps — report ONLY as a centralized **oracle upper bound** (it has global
+  assignment + full state); it is not a head-to-head competitor. The learned
+  decentralized policy uses local obs and no explicit assignment.
+- **Orbit failure (§9):** the high-variance seeds show the orbit signature
+  (far / fast / mis-headed / long episodes) vs healthy seeds.
+- **Compute (§7):** ≈5 GPU-h/run, ≈221 GPU-h total, peak ≤0.074 GB; tiny shared
+  nets (actor 73,986 / critic 20,737 params at n=4).
+
+All figures are written to `<ROOT>/res/`. Re-run this notebook (Run-All) to
+regenerate every artifact from the local light logs.
 """)
 
     nb = {"cells": CELLS,
