@@ -44,10 +44,14 @@ annotated with the reviewer concern it addresses.
 | Reviewer point | Section |
 |---|---|
 | R1 single-seed / R2#14 (3-5 seeds + CI) | §2 table, §3 curves, §6 stats |
-| R1 within-env baselines / R2#13 (extra ablation) | §2, §4 baseline comparison |
+| R1 within-env baselines / R2#13 (extra ablation) | §2, §4 baseline; §4b MADDPG |
+| R1 #14 return SD column | §2b |
+| R1 #12/#16 completion-time + Kaplan–Meier | §5c |
 | R1 reproducibility (net dims, reward weights) | §7 compute/repro, §8 reward map |
 | R2#2 collision constant c=7 / R2#3 alpha mapping | §8 |
-| R2#15 computational cost | §7 |
+| R2#15 computational cost / generalization | §7 / §5b |
+
+PNG + CSV → `<ROOT>/res/`; **all figure PDFs → `res/figures_pdf/`** (one dir).
 """)
 
     code(f"""
@@ -65,6 +69,10 @@ _LOCAL = os.path.join(os.path.dirname(_HERE), "revision_logs")     # repo/revisi
 ROOT = os.environ.get("REVISION_ROOT") or (_LOCAL if os.path.isdir(_LOCAL) else r"{root}")
 RUNS = os.path.join(ROOT, "runs")
 RES  = os.path.join(ROOT, "res"); os.makedirs(RES, exist_ok=True)
+# Vector PDFs of every figure go into ONE dedicated repo-level directory
+# (repo/res/figures_pdf) regardless of ROOT — ready to drop into the manuscript.
+_REPO = os.path.dirname(_HERE)
+PDF  = os.path.join(_REPO, "res", "figures_pdf"); os.makedirs(PDF, exist_ok=True)
 DETAILS = os.path.join(ROOT, "run_details.csv")
 
 MODES = ["full", "ablation", "nocoll"]
@@ -115,6 +123,34 @@ for mode in MODES:
     print(f"  {mode:<9}: {v.mean():5.1f} ± {v.std(ddof=0):4.1f}  (k={len(v)})")
 """)
 
+    md("""## §2b Episode return (scalar reward) mean ± SD  *(R1 #14)*
+
+R1 #14 asks Table 2 to also report the **return spread (SD)**. The scalar episode
+return is the last-200 mean of `sum_k alpha_k * comp_k` — the dot product of the
+mode's reward weights (§8) with the per-component means. Reported as mean ± SD
+across the 5 seeds per cell (population SD, ddof=0, matching §2).
+
+The very wide SD at **n4-nocoll** and **n5-full** is driven by the two
+orbit-failure seeds (n4_nocoll_s5, n5_full_s1) — the same outliers that widen the
+SR SD (§9). Return tracks success: the healthy cells sit at +90…+225, the
+outlier-dragged cells swing negative because the per-step time/direction penalties
+accumulate over the long un-terminated orbit episodes.""")
+
+    code("""
+SCALES = {"full": [1,1,0,10,10,10,1,1,1], "ablation": [0,0,0,10,10,10,1,1,1], "nocoll": [1,1,0,10,0,0,1,1,1]}
+_comps = [f"comp{i}_mean" for i in range(1, 10)]
+per_run["return"] = per_run.apply(lambda r: float(np.dot(r[_comps].values, SCALES[r["mode"]])), axis=1)
+ret = (per_run.groupby(["n", "mode"])["return"]
+       .agg(ret_mean="mean", ret_sd=lambda x: x.std(ddof=0)).round(1).reset_index())
+ret["return (mean±SD)"] = ret.ret_mean.map("{:.1f}".format) + " ± " + ret.ret_sd.map("{:.1f}".format)
+display(ret[["n", "mode", "return (mean±SD)"]])
+ret.to_csv(os.path.join(RES, "revision_return_summary.csv"), index=False)
+print("overall return by mode (mean ± SD):")
+for mode in MODES:
+    v = per_run[per_run["mode"] == mode]["return"]
+    print(f"  {mode:<9}: {v.mean():7.1f} ± {v.std(ddof=0):6.1f}")
+""")
+
     md("""## §3 Learning curves with shaded ±SD across seeds  *(R1 §3.1 / §3.2)*
 
 Rolling success / coverage (50-ep window) averaged across seeds with a ±1 SD
@@ -154,7 +190,7 @@ else:
         fig.suptitle(f"{title} ± SD across {len(SEEDS)} seeds"); fig.tight_layout()
         out = os.path.join(RES, f"revision_rolling_{metric}_full_valid")
         fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
-        fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+        fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
     plt.show()
 """)
 
@@ -179,50 +215,129 @@ for metric, mcol, scol, title, fname in [
     ax.legend(); ax.grid(axis="y", alpha=0.3)
     out = os.path.join(RES, fname)
     fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
-    fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+    fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
 plt.show()
 """)
 
     md("""## §4b MADDPG within-environment baseline  *(R1 #2 / #17)*
 
-Lowe-2017-style joint-action **centralized-critic** MADDPG, run through the same
-pipeline (offline relabeling, full reward, π/2) **without** the orbit-restart
-controller, on the matched seeds {1,2,3}. **Results to be added after the run**
-(`bash run/run_maddpg_baseline.sh`, then
-`python tools/export_light_logs.py --artifact_root <maddpg_root> --no_media`).
+Lowe-2017-style joint-action **centralized-critic** MADDPG (fixed CTDE variant
+`maddpg_obs` = `MADDPGSharedActorCriticIndependentObs`), run through the **same
+pipeline** (offline relabeling, full reward `[1,1,0,10,10,10,1,1,1]`, π/2,
+num_obstacles=0, env_size=20) **without** the orbit-restart controller, on the
+matched seeds {1,2,3}. Same last-200 window as the proposed method (fair).
 
-This cell auto-loads the MADDPG `run_details.csv` when available (set
-`MADDPG_ROOT`, or place it at `revision_logs_maddpg/`), and prints a
-matched-seed comparison vs the proposed method; otherwise it shows a placeholder.""")
+The original `--algorithm maddpg` was broken (3 bugs: reward-mask A, joint-action
+credit assignment B, state/action ordering C); `maddpg_obs` fixes A+B and
+conditions the critic on **concatenated per-agent obs in index order** (fixes C).
+Full writeup: `.ai/experiment_conclusions.md` §13.
+
+**Reporting decision (§13.3): report BOTH SR and coverage — do NOT suppress SR.**
+MADDPG attains *partial* success that **degrades with team size** and stays far
+below the proposed ≥93%: joint-action critic credit assignment weakens as N grows
+(cf. VDN/QMIX/COMA). One seed per n collapses to the chance floor (~25–30% cov,
+0% SR) — disclosed per-seed, never averaged away.
+
+Auto-loads the MADDPG `run_details.csv` from `revision_logs_maddpg_obs/`
+(override with `MADDPG_ROOT`); standalone table + head-to-head + bars + curves.""")
 
     code("""
-maddpg_root = os.environ.get("MADDPG_ROOT") or (ROOT.rstrip("/") + "_maddpg")
+maddpg_root = os.environ.get("MADDPG_ROOT") or \\
+    os.path.join(os.path.dirname(_HERE), "revision_logs_maddpg_obs")
 maddpg_csv = os.path.join(maddpg_root, "run_details.csv")
-if not os.path.exists(maddpg_csv):
-    print("MADDPG baseline results NOT YET AVAILABLE — to be added after the run.")
-    print("  1) bash run/run_maddpg_baseline.sh        (CONFIRM=1)")
-    print("  2) python tools/export_light_logs.py --artifact_root <maddpg_artifact_root> --no_media \\\\")
-    print("       --local_logs", maddpg_root)
-    print("  3) re-run this cell.")
+HAS_MADDPG = os.path.exists(maddpg_csv)
+if not HAS_MADDPG:
+    print("MADDPG baseline results NOT FOUND at", maddpg_csv)
+    print("  export: python tools/export_light_logs.py \\\\")
+    print("    --artifact_root <maddpg_artifact_root> --local_logs revision_logs_maddpg_obs --window 200")
 else:
     mad = pd.read_csv(maddpg_csv)
-    mad["mode"] = "MADDPG"      # label for the comparison
+    print(f"MADDPG loaded: {len(mad)} runs from {maddpg_root}")
+    # --- standalone per-n table: mean ± SD over seeds, SR & coverage, per-seed SR/cov ---
+    tbl = []
+    for n in NS:
+        sub = mad[mad.n == n]
+        if not len(sub): continue
+        tbl.append(dict(n=n, seeds=len(sub),
+            SR=f"{sub.SR.mean():.1f} ± {sub.SR.std(ddof=0):.1f}",
+            coverage=f"{sub.coverage.mean():.1f} ± {sub.coverage.std(ddof=0):.1f}",
+            SR_per_seed=", ".join(f"{s}:{v}" for s, v in zip(sub.seed, sub.SR)),
+            cov_per_seed=", ".join(f"{s}:{v}" for s, v in zip(sub.seed, sub.coverage))))
+    display(pd.DataFrame(tbl))
+""")
+
+    code("""
+if HAS_MADDPG:
+    # --- head-to-head vs proposed (full) on shared seeds ---
     shared = sorted(set(mad.seed) & set(per_run.seed))
-    print(f"MADDPG loaded ({len(mad)} runs); comparing on shared seeds {shared} vs proposed (full).")
     ours = per_run[(per_run["mode"] == "full") & (per_run.seed.isin(shared))]
     mads = mad[mad.seed.isin(shared)]
+    print(f"Head-to-head on shared seeds {shared}: proposed (full) vs MADDPG")
     cmp = []
     for n in NS:
         o = ours[ours.n == n].SR; m = mads[mads.n == n].SR
         oc = ours[ours.n == n].coverage; mc = mads[mads.n == n].coverage
         cmp.append(dict(n=n,
-                        proposed_SR=f"{o.mean():.1f} ± {o.std(ddof=0):.1f}",
-                        MADDPG_SR=f"{m.mean():.1f} ± {m.std(ddof=0):.1f}" if len(m) else "—",
-                        proposed_cov=f"{oc.mean():.1f} ± {oc.std(ddof=0):.1f}",
-                        MADDPG_cov=f"{mc.mean():.1f} ± {mc.std(ddof=0):.1f}" if len(mc) else "—",
-                        proposed_per_seed=", ".join(f"{s}:{v}" for s,v in zip(ours[ours.n==n].seed,o)),
-                        MADDPG_per_seed=", ".join(f"{s}:{v}" for s,v in zip(mads[mads.n==n].seed,m))))
-    display(pd.DataFrame(cmp))
+            proposed_SR=f"{o.mean():.1f} ± {o.std(ddof=0):.1f}" if len(o) else "—",
+            MADDPG_SR=f"{m.mean():.1f} ± {m.std(ddof=0):.1f}" if len(m) else "—",
+            proposed_cov=f"{oc.mean():.1f} ± {oc.std(ddof=0):.1f}" if len(oc) else "—",
+            MADDPG_cov=f"{mc.mean():.1f} ± {mc.std(ddof=0):.1f}" if len(mc) else "—",
+            MADDPG_SR_per_seed=", ".join(f"{s}:{v}" for s, v in zip(mads[mads.n==n].seed, m))))
+    cmpdf = pd.DataFrame(cmp); display(cmpdf)
+    cmpdf.to_csv(os.path.join(RES, "revision_maddpg_vs_proposed.csv"), index=False)
+""")
+
+    code("""
+if HAS_MADDPG:
+    # --- grouped bars: proposed (full) vs MADDPG, SR and coverage per n (±SD over seeds) ---
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    width = 0.35; x = np.arange(len(NS))
+    for ax, (col, title) in zip(axes, [("SR", "Success rate (full-team)"),
+                                       ("coverage", "Coverage (partial credit)")]):
+        op = per_run[per_run["mode"] == "full"]
+        om = [op[op.n == n][col].mean() for n in NS]; os_ = [op[op.n == n][col].std(ddof=0) for n in NS]
+        mm = [mad[mad.n == n][col].mean() for n in NS]; ms = [mad[mad.n == n][col].std(ddof=0) for n in NS]
+        ax.bar(x - width/2, om, width, yerr=os_, capsize=4, label="proposed (full)", color="#1f77b4", alpha=0.85)
+        ax.bar(x + width/2, mm, width, yerr=ms, capsize=4, label="MADDPG", color="#9467bd", alpha=0.85)
+        ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS])
+        ax.set_ylim(0, 105); ax.set_ylabel("%"); ax.set_title(title); ax.grid(axis="y", alpha=0.3); ax.legend()
+    fig.suptitle("MADDPG within-env baseline vs proposed method (matched config, last-200)")
+    out = os.path.join(RES, "revision_maddpg_baseline")
+    fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+    fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
+    plt.show()
+""")
+
+    code("""
+if HAS_MADDPG:
+    # --- MADDPG learning curves (rolling coverage, ±SD across seeds) from episode_summary.csv ---
+    mruns = os.path.join(maddpg_root, "runs")
+    def maddpg_series(n, seed):
+        for nm in (f"maddpg_obs_n{n}_full_seed{seed}", f"n{n}_full_seed{seed}"):
+            p = os.path.join(mruns, nm, "episode_summary.csv")
+            if os.path.exists(p):
+                s = pd.read_csv(p).sort_values("episode_id")
+                return s.done_count.to_numpy() / n
+        return None
+    if glob.glob(os.path.join(mruns, "*", "episode_summary.csv")):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        cmap = {4: "#1f77b4", 5: "#d62728", 6: "#2ca02c"}
+        for n in NS:
+            curves = [rolling(s) for seed in (1, 2, 3) if (s := maddpg_series(n, seed)) is not None]
+            if not curves: continue
+            L = min(len(c) for c in curves); M = np.vstack([c[:L] for c in curves])
+            mean, sd = 100 * M.mean(0), 100 * M.std(0, ddof=0)
+            ax.plot(np.arange(L), mean, color=cmap[n], label=f"n={n}")
+            ax.fill_between(np.arange(L), mean - sd, mean + sd, color=cmap[n], alpha=0.15)
+        ax.set_xlabel("episode"); ax.set_ylabel("coverage (%)"); ax.set_ylim(-2, 105)
+        ax.set_title("MADDPG rolling coverage ± SD across 3 seeds (does not converge to full success)")
+        ax.legend(); ax.grid(alpha=0.3)
+        out = os.path.join(RES, "revision_maddpg_curves")
+        fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+        fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
+        plt.show()
+    else:
+        print("MADDPG episode_summary.csv not present — skipping curves (table/bars above still valid).")
 """)
 
     md("""## §5 Coverage vs success scatter — partial-credit view
@@ -241,7 +356,7 @@ ax.set_xlabel("coverage (%)"); ax.set_ylabel("success rate (%)")
 ax.set_title("Per-run coverage vs full-team success"); ax.legend(); ax.grid(alpha=0.3)
 out = os.path.join(RES, "revision_coverage_vs_success_scatter")
 fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
-fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
 plt.show()
 """)
 
@@ -307,10 +422,10 @@ if HAS_EVAL:
         ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS])
         ax.set_ylim(0, 105); ax.set_ylabel("%"); ax.set_title(title)
         ax.grid(axis="y", alpha=0.3); ax.legend(fontsize=9)
-    fig.suptitle("Deterministic eval: generalization to a larger arena + oracle ceiling")
+    fig.suptitle("Deterministic eval: transfer to a larger arena + oracle ceiling")
     out = os.path.join(RES, "revision_eval_generalization")
     fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
-    fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+    fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
     plt.show()
 """)
 
@@ -327,7 +442,89 @@ if HAS_EVAL:
     ax.legend(); ax.grid(alpha=0.3)
     out = os.path.join(RES, "revision_eval_cov_vs_sr")
     fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
-    fig.savefig(out + ".pdf", bbox_inches="tight"); print("saved", out + ".{png,pdf}")
+    fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
+    plt.show()
+""")
+
+    md("""## §5c Completion time & Kaplan–Meier survival  *(R1 #12, #14, #16)*
+
+Time-to-full-team-success from the deterministic eval episodes
+(`eval_episodes.csv`). For each episode the **event** is full-team success at
+`completion_time` (steps); episodes that never succeed are **right-censored** at
+the 500-step horizon. This yields two things the reviewers asked for:
+
+- **Completion-time distribution** of successful episodes — mean ± SD and median
+  (R1 #14: report the spread). **This reconciles R1 #16**: the true median
+  time-to-success is **~37–55 steps** at the training arena (env20), far inside
+  the 500-step horizon — *not* the "≈280" figure the discussion quoted. SR
+  (≈90–93%) and completion time are orthogonal axes and are now reported as such;
+  the ≈280 came from mixing the two. The heuristic oracle completes in ~10 steps.
+- **Kaplan–Meier survival curves** S(t) = P(team not yet fully covered by step t),
+  pooled across the 5 seeds, per n, env20 vs env25 (event = success, censored at
+  500). Each curve plateaus at **1 − SR** (the never-completed fraction); the
+  median completion time is where it crosses 0.5. The KM estimator handles the
+  censored failures correctly, so the curve is an honest time-to-success summary
+  rather than a successes-only average.""")
+
+    code("""
+if not HAS_EVAL:
+    print("eval episodes not available — skipping completion-time / KM (R1 #12/#16)")
+else:
+    epi = pd.read_csv(os.path.join(EVAL_DIR, "eval_episodes.csv"))
+    HORIZON = 500.0
+    rows = []
+    for (kind, env, n), sub in epi.groupby(["kind", "env", "n"]):
+        succ = sub[sub.success == 1].completion_time
+        rows.append(dict(kind=kind, env=int(env), n=int(n), episodes=len(sub),
+            SR=round(100 * sub.success.mean(), 1),
+            compT_mean=round(succ.mean(), 1), compT_sd=round(succ.std(ddof=0), 1),
+            compT_median=round(succ.median(), 1)))
+    compt = pd.DataFrame(rows).sort_values(["kind", "env", "n"]).reset_index(drop=True)
+    print("Completion time (steps) of SUCCESSFUL episodes; SR shown for context:")
+    display(compt)
+    compt.to_csv(os.path.join(RES, "revision_completion_time.csv"), index=False)
+""")
+
+    code("""
+def km_curve(times, events, horizon=500.0):
+    \"\"\"Kaplan-Meier survival S(t)=P(not yet completed). times NaN -> censored at horizon.\"\"\"
+    t = np.where(np.isnan(times), horizon, times).astype(float)
+    d = np.asarray(events, dtype=int)
+    order = np.argsort(t); t, d = t[order], d[order]
+    xs, ys, S = [0.0], [1.0], 1.0
+    for tt in np.unique(t):
+        risk = int((t >= tt).sum()); ev = int(((t == tt) & (d == 1)).sum())
+        if risk > 0 and ev > 0:
+            S *= (1 - ev / risk)
+        xs.append(float(tt)); ys.append(S)
+    return np.array(xs), np.array(ys)
+
+if HAS_EVAL:
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+    NCOLOR = {4: "#1f77b4", 5: "#ff7f0e", 6: "#2ca02c"}
+    for ax, env in zip(axes, [20, 25]):
+        for n in NS:
+            sub = epi[(epi.kind == "policy") & (epi.env == env) & (epi.n == n)]
+            if sub.empty: continue
+            xs, ys = km_curve(sub.completion_time.values, sub.success.values)
+            ax.step(xs, ys, where="post", color=NCOLOR[n], label=f"learned n={n}")
+        if env == 20:  # oracle reference, env20 only
+            for n in NS:
+                sub = epi[(epi.kind == "heuristic") & (epi.env == env) & (epi.n == n)]
+                if sub.empty: continue
+                xs, ys = km_curve(sub.completion_time.values, sub.success.values)
+                ax.step(xs, ys, where="post", color="k", alpha=0.35, lw=1,
+                        label="oracle" if n == NS[0] else None)
+        ax.axhline(0.5, color="gray", ls=":", alpha=0.6)
+        ax.set_title(f"env{env}" + (" (training arena)" if env == 20 else " (25% larger, unseen)"))
+        ax.set_xlabel("step"); ax.set_xlim(0, 500); ax.grid(alpha=0.3)
+    axes[0].set_ylabel("S(t) = P(team not yet fully covered)")
+    axes[0].set_ylim(0, 1.02); axes[0].legend(fontsize=9)
+    fig.suptitle("Kaplan-Meier: time to full-team coverage (5 seeds pooled; censored at 500)")
+    fig.tight_layout()
+    out = os.path.join(RES, "revision_km_completion")
+    fig.savefig(out + ".png", dpi=130, bbox_inches="tight")
+    fig.savefig(os.path.join(PDF, os.path.basename(out) + ".pdf"), bbox_inches="tight"); print("saved", out + ".png +", os.path.join(PDF, os.path.basename(out)+".pdf"))
     plt.show()
 """)
 
@@ -451,8 +648,8 @@ display(pd.DataFrame(brk).T)
 
     md("""## §10 Gaps & follow-ups (not in this batch)
 
-- **MADDPG baseline (R1 #2/#17)** — fixed CTDE variant (`maddpg_obs`) relaunched;
-  see §4b. Results to be added after the run completes.
+- **MADDPG baseline (R1 #2/#17)** — DONE; see §4b (fixed CTDE variant `maddpg_obs`,
+  3 seeds × n∈{4,5,6}). Partial success degrading with N, well below the proposed method.
 - **R2#10 scalability 8–10 agents** — not run; narrow claims to n∈{4,5,6}.
 - **R2#15 generalization to other env sizes** — DONE; see §5b (env20→env25).
 - **R2#6/#11 obstacles** — num_obstacles=0; acknowledge as limitation. NOTE: the
@@ -483,17 +680,32 @@ used in the revision. Summary of what the cells above establish:
   time / path length grow ~50–80%). Coverage stays ≥85% in every cell even where
   SR dips (n5 env25 SR 55.7 but cov 85.0; n6 env25 SR 71.4 but cov 95.0) → the
   partial-credit metric shows the policy is "one agent short," not failing.
+- **MADDPG baseline (§4b, R1#2/#17):** fixed CTDE MADDPG (`maddpg_obs`), matched
+  config, 3 seeds. Partial success that **degrades with team size** and stays far
+  below the proposed method (≥93%): n4 ≈15% SR / ≈58% cov, n5 **0% SR** / ≈29% cov
+  (dead zone), n6 ≈11% SR / ≈62% cov. One seed per n collapses to the chance floor
+  (~25–30% cov) — disclosed per-seed. Joint-action critic credit assignment weakens
+  as N grows. Report SR AND coverage; do not suppress SR.
 - **Heuristic oracle (§5b, R1#2):** Hungarian + P-controller hits 100% in ~10
   steps — report ONLY as a centralized **oracle upper bound** (it has global
   assignment + full state); it is not a head-to-head competitor. The learned
   decentralized policy uses local obs and no explicit assignment.
+- **Return spread (§2b, R1#14):** scalar episode return mean ± SD per cell.
+  Healthy cells +90…+225; the two outlier-dragged cells (n4-nocoll −21.9 ± 387,
+  n5-full −32.1 ± 330) swing negative and wide — same seeds, same story as the SR SD.
+- **Completion time / Kaplan–Meier (§5c, R1#12/#16):** deterministic median
+  time-to-success **~37–55 steps at env20** (mean 54–76, SD ~60–80), well inside
+  the 500-step horizon — this **reconciles R1#16** (the discussion's "≈280" mixed
+  completion time with the success rate). KM survival curves (censored at 500)
+  plateau at 1 − SR; the oracle completes in ~10 steps.
 - **Orbit failure (§9):** the high-variance seeds show the orbit signature
   (far / fast / mis-headed / long episodes) vs healthy seeds.
 - **Compute (§7):** ≈5 GPU-h/run, ≈221 GPU-h total, peak ≤0.074 GB; tiny shared
   nets (actor 73,986 / critic 20,737 params at n=4).
 
-All figures are written to `<ROOT>/res/`. Re-run this notebook (Run-All) to
-regenerate every artifact from the local light logs.
+PNG figures + CSVs are written to `<ROOT>/res/`; **vector PDFs of every figure go
+to one dedicated repo-level directory `res/figures_pdf/`** (manuscript-ready).
+Re-run this notebook (Run-All) to regenerate every artifact from the local light logs.
 """)
 
     nb = {"cells": CELLS,
