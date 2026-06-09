@@ -58,3 +58,7 @@ revision_logs/
 nohup.out
 checkpoints_local/
 *_run.log
+revision_logs_maddpg_obs/
+revision_logs_mappo/
+*.md
+/res/supplementary/
