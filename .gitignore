@@ -60,5 +60,6 @@ checkpoints_local/
 *_run.log
 revision_logs_maddpg_obs/
 revision_logs_mappo/
+revision_logs_round3/
 *.md
 /res/supplementary/
