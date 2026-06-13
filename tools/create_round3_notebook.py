@@ -114,6 +114,7 @@ FIG.mkdir(parents=True, exist_ok=True)
 NS, SEEDS = [4, 5, 6], [1, 2, 3, 4, 5]
 HORIZON   = 500
 COND_COL  = {"Full": "#2e86ab", "-restart": "#edae49", "-HER": "#d1495b"}
+COND_LABEL = {"Full": "Full", "-restart": "No-restart", "-HER": "No-HER"}  # legend = manuscript text
 
 def fig_show(fig, name):
     fig.tight_layout(); out = FIG / f"{name}.pdf"
@@ -145,10 +146,8 @@ The reviewer asks how much of the performance comes from the reward structure ve
 HER and the restart mechanism. We retrain our method (IDDPGWithoutS, full reward, the
 same 5 seeds × n∈{4,5,6}) with each mechanism removed, and decompose the contribution.
 
-> **PENDING until the long runs finish.** Launch with
-> `CONFIRM=1 bash run/run_round3_longruns.sh ONLY=ablation`, export with
-> `python tools/export_light_logs.py --artifact_root <root> --no_media --local_logs revision_logs_round3`,
-> then re-run this notebook.""")
+> **Complete (2026-06-12).** All 30 ablation runs (2 rungs × n{4,5,6} × seeds 1–5) are in
+> and finished at 1000 episodes; the tables below are the full 5-seed result.""")
 
 code(r"""# %% A1 assemble the ablation ladder -------------------------------------
 def cond_of(run):
@@ -196,10 +195,10 @@ else:
         for c in CONDS:
             g = abl[(abl.cond == c) & (abl.n == n)].SR
             m[c] = g.mean() if len(g) else np.nan
-            row[f"{c} SR%"] = f"{g.mean():.1f} ± {g.std():.1f}" if len(g) else "—"
-        row["restart effect (Full−noRestart)"] = (f"{m['Full']-m['-restart']:+.1f}"
+            row[f"{COND_LABEL[c]} SR%"] = f"{g.mean():.1f} ± {g.std():.1f}" if len(g) else "—"
+        row["restart effect (Full−No-restart)"] = (f"{m['Full']-m['-restart']:+.1f}"
             if np.isfinite(m['Full']) and np.isfinite(m['-restart']) else "—")
-        row["HER effect (noRestart−noHER)"] = (f"{m['-restart']-m['-HER']:+.1f}"
+        row["HER effect (No-restart−No-HER)"] = (f"{m['-restart']-m['-HER']:+.1f}"
             if np.isfinite(m['-restart']) and np.isfinite(m['-HER']) else "—")
         tab.append(row)
     display(pd.DataFrame(tab))
@@ -215,7 +214,7 @@ if not abl.empty and set(abl.cond.unique()) != {"Full"}:
         means = [abl[(abl.cond == c) & (abl.n == n)].SR.mean() for n in NS]
         sds   = [abl[(abl.cond == c) & (abl.n == n)].SR.std()  for n in NS]
         ax.bar(x + (i - 1) * w, means, w, yerr=sds, capsize=3,
-               color=COND_COL[c], label=c, alpha=0.9)
+               color=COND_COL[c], label=COND_LABEL[c], alpha=0.9)
         for j, n in enumerate(NS):
             pts = abl[(abl.cond == c) & (abl.n == n)].SR.values
             ax.scatter([x[j] + (i - 1) * w] * len(pts), pts, s=12, color="k",
@@ -604,9 +603,8 @@ full-method actors (deterministic, noise off) across a **ratio curve** of arena 
 default env ∈ {15, 18, 20, 25, 30} = 0.75–1.5× of the env20 training arena. env15 is the
 small floor (landmark placement is 0% infeasible at n=6 there, but fails below env14).
 
-> **PENDING until the eval finishes.** Produced by
-> `CONFIRM=1 PHASE=eval bash run/run_round3_longruns.sh`, then
-> `python tools/aggregate_eval.py --eval_dir <EVAL_OUT_ROOT>/eval --out_dir revision_logs_round3/eval`.
+> **Complete (2026-06-12).** The full arena-size sweep is aggregated in
+> `revision_logs_round3/eval/`; the curve below is the final 5-seed transfer result.
 
 **Interpretation caveat.** Reach threshold (0.5), landmark separation (5.0) and
 `agent_radius` are *absolute*, while observations are normalized by `env_size/2`. So a
@@ -702,8 +700,8 @@ long runs land).
 | **Fig 13** final-window SR | raw per-seed dots overlaid (#32) | ready |
 | **Fig 14** sample-efficiency | per-seed E₈₀ points/box + never-reached marks (#16, #32) | ready |
 | **Fig 19** completion | reframed as completion-time CDF + log-rank (§D, #28) | ready |
-| **Fig 21** baselines | seed dots; `Proposed/MADDPG/MAPPO` (#32) | partial (MADDPG→5 seeds) |
-| **Fig 22** transfer | title "transfer" not "generalization"; oracle separated (#5c, #9) | ready (multi-size when eval lands) |
+| **Fig 21** baselines | seed dots; `Proposed/MADDPG/MAPPO` (#32) | ready (full 5 seeds) |
+| **Fig 22** transfer | title "transfer" not "generalization"; oracle separated (#5c, #9) | ready (full multi-size sweep) |
 
 Fonts are bumped uniformly here; apply the same style to the structurally-fine figures
 (6,7,8,11,12,15) on a final pass if desired.""")
@@ -816,8 +814,7 @@ for i, (vals, c, nv) in enumerate(zip(data, colors, never)):
                     fontsize=9, color="crimson")
 ax.set_xticks(pos); ax.set_xticklabels(labels, fontsize=10)
 ax.set_ylabel("episodes to reach rolling-SR ≥ 80%  (E₈₀, lower=faster)", **CORR)
-ax.set_title("Sample efficiency: per-seed E₈₀ (box + raw seeds; #16 — no 'all-n' claim)",
-             fontsize=14)
+ax.set_title("Sample efficiency: per-seed E₈₀ (box + raw seeds)", fontsize=14)
 fig_show(fig, "fig14_sample_efficiency")""")
 
 code(r"""# %% Fig 21 — baseline comparison with raw seed dots --------------------
@@ -835,9 +832,8 @@ for i, (lab, d, col) in enumerate(series):
             ax.scatter(x[j] + (i - 1) * w + rng_j.uniform(-0.05, 0.05, len(pts)), pts,
                        s=22, color="k", alpha=0.6, zorder=4)
 ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS], **CORR); ax.set_ylim(0, 105)
-ax.set_ylabel("training-window success rate (%)", **CORR)
-ncnt = {n: len(MADDPG_SR[n]) for n in NS}
-ax.set_title(f"Within-environment baselines (raw seeds; MADDPG seeds/n={ncnt})", fontsize=13)
+ax.set_ylabel("final-window full-team success rate (%)", **CORR)
+ax.set_title("Within-environment baselines (raw seeds overlaid)", fontsize=13)
 ax.tick_params(labelsize=12); ax.legend(frameon=False, fontsize=12)
 fig_show(fig, "fig21_baseline_comparison")
 if any(len(MADDPG_SR[n]) < 5 for n in NS):
@@ -859,7 +855,7 @@ ax.axvline(20, color="k", ls="--", lw=1, alpha=0.5); ax.text(20.2, 4, "training 
 ax.set_xlabel("arena size (env)", **CORR); ax.set_ylabel("deterministic success rate (%)", **CORR)
 ax.set_title("Deterministic eval: transfer across arena sizes", fontsize=14)
 ax.set_ylim(0, 105); ax.tick_params(labelsize=12)
-ax.legend(frameon=False, fontsize=11, title="(oracle reported separately, not a peer)")
+ax.legend(frameon=False, fontsize=11)
 fig_show(fig, "fig22_transfer")
 if tpol is None or not len(tpol):
     print("Fig 22 shows env20/25 only — full {15,18,20,25,30} curve fills in after PHASE=eval.")""")

@@ -13,10 +13,21 @@
 #   abl_noHER_*      iddpg_without_s (train_loop)           (HER off, restart off)
 #   maddpg_obs_*     maddpg_obs --use_offline_replay        (seeds 4,5 only)
 #
-# RESUME / SKIP: a run is "done" if its meta.json says finished EITHER in the
-# local ARTIFACT_ROOT OR in OFFLOAD_ROOT (the external drive). So the 20 runs
-# already offloaded to Z7S are skipped automatically — only the missing seeds
-# (and any partial run copied back local for resume) actually train.
+# RESUME / SKIP — every job lands in exactly one of three states, logged as
+# "run i/N <verb> <name> at episode E/EPISODES":
+#   * DONE    — meta.json says finished (episodes_completed >= EPISODES) in
+#               EITHER local ARTIFACT_ROOT OR OFFLOAD_ROOT. Skipped immediately.
+#   * RESUME  — a usable checkpoint (replay_buffer.pkl + a *_training_state.pkl)
+#               exists locally and/or on the archive. If the archive copy is
+#               further along than local — including the common case where the
+#               lean-local dir was pruned and the only checkpoint lives on the
+#               external drive — its resume files are auto-restored to local
+#               first, then train_seeded.py resumes from that episode. (This was
+#               previously a manual `cp -r` step; doing it automatically is what
+#               keeps partial runs from being orphaned after a reboot/interrupt.)
+#   * FRESH   — no checkpoint anywhere → start at episode 0. A stale meta.json
+#               (episodes_completed>0 with no checkpoint to back it) is cleared
+#               so train_seeded.py's no-restart-from-scratch guard does not trip.
 #
 # RUN (human launches — provides commands only, per project policy):
 #   CONFIRM=1 SEEDS="3 4 5" bash run/run_round3_offload.sh           # #8 + #7
@@ -25,9 +36,6 @@
 # Overrides:
 #   PARALLEL=3  SEEDS="3 4 5"  NS="4 5 6"  OFFLOAD=1
 #   ARTIFACT_ROOT=<local lean>   OFFLOAD_ROOT=<external archive>
-#
-# To RESUME a partial run that currently lives only on OFFLOAD_ROOT, copy its
-# dir back to ARTIFACT_ROOT/runs/ first (see the printed pre-flight hint).
 #
 # AFTER the runs, build the report off the COMPLETE set on the external drive:
 #   python tools/export_light_logs.py --artifact_root "$OFFLOAD_ROOT" \
@@ -118,19 +126,107 @@ sys.exit(1)
 PY
 }
 
+# Decide how a NOT-finished run should start. Prints "<action> <episode>" where
+# action ∈ {archive,local,clear,fresh} and <episode> is where train_seeded.py
+# will resume (0 = fresh). "archive" => the external copy is further along than
+# local and should be restored; "clear" => meta claims progress but no usable
+# checkpoint exists anywhere (a stale stub) so meta must be wiped.
+resume_plan() {
+  local name="$1"
+  python - "$ARTIFACT_ROOT/runs/$name" "$OFFLOAD_ROOT/runs/$name" <<'PY'
+import json, os, re, sys
+def meta_completed(d):
+    try:
+        return int(json.load(open(os.path.join(d, "meta.json"))).get("episodes_completed") or 0)
+    except Exception:
+        return 0
+def resumable_ep(d):
+    # train_seeded.py needs the main replay buffer to resume at all.
+    if not os.path.exists(os.path.join(d, "replay_buffer.pkl")):
+        return -1
+    # Mirror train_seeded.py's resume precedence EXACTLY: the bare
+    # training_state.pkl wins; only if it is absent does it fall back to the
+    # latest episode_*_training_state.pkl. (A dir may also hold stale numbered
+    # snapshots from an earlier abandoned attempt — those must NOT be read as
+    # progress when a newer bare training_state.pkl is present, or we'd restore
+    # a stale checkpoint over a good run.)
+    if os.path.exists(os.path.join(d, "training_state.pkl")):
+        return meta_completed(d)                  # episode of the live checkpoint
+    best = -1
+    try:
+        for nm in os.listdir(d):
+            m = re.match(r"^episode_(\d+)_training_state\.pkl$", nm)
+            if m:
+                best = max(best, int(m.group(1)))
+    except FileNotFoundError:
+        pass
+    return best
+local, arch = sys.argv[1], sys.argv[2]
+le, ae = resumable_ep(local), resumable_ep(arch)
+mc = max(meta_completed(local), meta_completed(arch))
+if ae > le and ae >= 0:
+    print(f"archive {ae}")
+elif le >= 0:
+    print(f"local {le}")
+elif mc > 0:
+    print("clear 0")
+else:
+    print("fresh 0")
+PY
+}
+
+# Per-episode replay snapshots and per-episode model dumps are huge and not
+# needed to resume (train_seeded.py reloads bare replay_buffer.pkl + *.pth);
+# excluding them keeps the local disk lean during a restore.
+RESTORE_EXCLUDES=( --exclude='replay_buffer_*.pkl' --exclude='episode_*__*.pth' --exclude='*.png' )
+
+# Make the local out_dir resumable and echo the start episode (0 = fresh).
+# Diagnostics go to stderr so the command-substitution caller captures only the
+# episode number on stdout.
+prepare_resume() {
+  local name="$1" out_dir="$ARTIFACT_ROOT/runs/$name" arch_dir="$OFFLOAD_ROOT/runs/$name"
+  local plan action ep
+  plan="$(resume_plan "$name")"; action="${plan%% *}"; ep="${plan##* }"
+  case "$action" in
+    archive)
+      echo "[$(date +%T)] RESTORE $name: copying checkpoint (ep $ep) from archive -> local" >&2
+      mkdir -p "$out_dir"
+      rsync -a "${RESTORE_EXCLUDES[@]}" "$arch_dir/" "$out_dir/" >/dev/null 2>&1 \
+        || echo "[$(date +%T)] WARN restore rsync failed for $name (will start fresh)" >&2
+      ;;
+    clear)
+      echo "[$(date +%T)] STALE-META $name: meta claims progress but no checkpoint anywhere; clearing meta to start fresh" >&2
+      rm -f "$out_dir/meta.json"
+      ;;
+  esac
+  echo "$ep"
+}
+
 launch_one() {
-  local name="$1" algo="$2" n="$3" seed="$4" flags="$5"
+  local name="$1" algo="$2" n="$3" seed="$4" flags="$5" idx="$6" total="$7"
   local out_dir="$ARTIFACT_ROOT/runs/$name"
   local log="$LOG_DIR/${name}.log"
   mkdir -p "$out_dir"
+
+  # DONE → skip without touching anything.
+  if run_finished "$name"; then
+    echo "[$(date +%T)] job $idx/$total DONE     $name (already finished local/archive — skipping)"
+    return 0
+  fi
+
+  # RESUME (restoring from archive if needed) or FRESH.
+  local start_ep verb
+  start_ep="$(prepare_resume "$name")"
+  if (( start_ep > 0 )); then verb="resuming"; else verb="starting"; fi
+  echo "[$(date +%T)] job $idx/$total $verb $name at episode $start_ep/$EPISODES  [$algo ${flags:-train_loop}] -> $log"
+
   local attempt=0
   while :; do
-    if run_finished "$name"; then echo "[$(date +%T)] DONE $name (finished local/archive)"; break; fi
+    if run_finished "$name"; then echo "[$(date +%T)] job $idx/$total DONE     $name"; break; fi
     if (( attempt > MAX_RETRIES )); then
-      echo "[$(date +%T)] GAVE UP $name after $MAX_RETRIES resumes (see $log)"; return 1
+      echo "[$(date +%T)] job $idx/$total GAVE UP  $name after $MAX_RETRIES resumes (see $log)"; return 1
     fi
-    if (( attempt == 0 )); then echo "[$(date +%T)] launching $name -> $log"
-    else echo "[$(date +%T)] RESUME $name (attempt $attempt/$MAX_RETRIES)"; fi
+    (( attempt > 0 )) && echo "[$(date +%T)] job $idx/$total RESUME   $name (attempt $attempt/$MAX_RETRIES)"
     # $flags unquoted so an empty string adds no argument.
     python run/train_seeded.py \
       --algorithm "$algo" \
@@ -141,17 +237,24 @@ launch_one() {
       --artifact_root "$ARTIFACT_ROOT" \
       >>"$log" 2>&1 || echo "[$(date +%T)] rc=$? $name (will check meta / maybe resume)" >>"$log"
     attempt=$((attempt+1))
-    run_finished "$name" && { echo "[$(date +%T)] DONE $name"; break; }
+    run_finished "$name" && { echo "[$(date +%T)] job $idx/$total DONE     $name"; break; }
     sleep "$RETRY_BACKOFF"
   done
   # Enqueue the finished local run for the independent offload worker.
   if [[ "$OFFLOAD" == "1" && -f "$out_dir/meta.json" ]]; then
     printf '%s\n' "$out_dir" > "$OFFLOAD_QUEUE/$(date +%s%N)_${name}.job"
-    echo "[$(date +%T)] ENQUEUED offload $name"
+    echo "[$(date +%T)] job $idx/$total ENQUEUED offload $name"
   fi
 }
 
-throttle() { while (( $(jobs -rp | wc -l) >= PARALLEL )); do sleep 2; done; }
+# PARALLEL = number of concurrent TRAIN jobs. The +1 offload worker is a 4th
+# background job, so the total-job ceiling is PARALLEL+1 when OFFLOAD=1 (e.g.
+# 3 train + 1 offload = 4) and PARALLEL when offload is off — either way exactly
+# PARALLEL trainers run, never PARALLEL-1.
+throttle() {
+  local cap=$(( OFFLOAD == 1 ? PARALLEL + 1 : PARALLEL ))
+  while (( $(jobs -rp | wc -l) >= cap )); do sleep 2; done
+}
 
 # ── The independent "+1" offload worker ──────────────────────────────────────
 # Drains OFFLOAD_QUEUE one job at a time (so at most ONE offload runs at once),
@@ -185,17 +288,30 @@ if [[ "$OFFLOAD" == "1" ]]; then
       rm -f "$job"
     done
     echo "[offload] worker exiting (queue drained)"
-  ) &
+  ) >>"$LOG_DIR/offload.log" 2>&1 &
   worker_pid=$!
 fi
 trap 'kill $worker_pid 2>/dev/null' EXIT INT TERM
 
 # ── Training pool: up to PARALLEL concurrent jobs ────────────────────────────
-echo "[$(date +%T)] === ${#JOBS[@]} job slots, PARALLEL=$PARALLEL (+1 offload), seeds={$SEEDS} ==="
+TOTAL=${#JOBS[@]}
+idx=0
+# Pre-pass for an honest counter: how many jobs are already finished (local or
+# archive) vs. still to run. The per-job "job X/$TOTAL" index below is a POSITION
+# in the list, not a progress count — this summary is the real progress.
+finished_count=0
+for j in "${JOBS[@]}"; do
+  IFS='|' read -r jn _ <<<"$j"
+  run_finished "$jn" && finished_count=$((finished_count+1))
+done
+torun=$(( TOTAL - finished_count ))
+echo "[$(date +%T)] === $TOTAL jobs: $finished_count finished, $torun to run | PARALLEL=$PARALLEL (+1 offload), seeds={$SEEDS} ==="
+echo "[$(date +%T)]     (offload mirror logs -> $LOG_DIR/offload.log; per-run training logs -> $LOG_DIR/<name>.log)"
 for j in "${JOBS[@]}"; do
   IFS='|' read -r name algo n seed flags <<<"$j"
+  idx=$((idx+1))
   throttle
-  launch_one "$name" "$algo" "$n" "$seed" "$flags" &
+  launch_one "$name" "$algo" "$n" "$seed" "$flags" "$idx" "$TOTAL" &
 done
 wait
 
