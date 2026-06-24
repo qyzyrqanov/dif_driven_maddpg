@@ -351,7 +351,7 @@ ax.plot(x, [full[full.n == n].SR.mean() for n in NS], "k_", ms=26, mew=2, label=
 ax.annotate("n=5 seed 1 (low-success)", xy=(1, 49.5), xytext=(1.15, 35),
             fontsize=9, arrowprops=dict(arrowstyle="->", lw=1))
 ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS]); ax.set_ylim(0, 105)
-ax.set_ylabel("training-window SR (%)")
+ax.set_ylabel("final-window full-team SR (%)")
 ax.set_title("Per-seed SR by team size (full mode)")
 ax.legend(frameon=False)
 fig_show(fig, "p4_n5_diagnostic")""")
