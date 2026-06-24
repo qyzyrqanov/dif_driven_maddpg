@@ -220,7 +220,7 @@ if not abl.empty and set(abl.cond.unique()) != {"Full"}:
             ax.scatter([x[j] + (i - 1) * w] * len(pts), pts, s=12, color="k",
                        alpha=0.45, zorder=3)
     ax.set_xticks(x); ax.set_xticklabels([f"n={n}" for n in NS]); ax.set_ylim(0, 105)
-    ax.set_ylabel("training-window SR (%)")
+    ax.set_ylabel("final-window full-team SR (%)")
     ax.set_title("HER / orbit-restart ablation (raw seeds overlaid)")
     ax.legend(frameon=False, title="condition")
     fig_show(fig, "p8_her_restart_ablation")
@@ -789,7 +789,8 @@ ax.tick_params(labelsize=12); ax.legend(frameon=False, fontsize=12)
 fig_show(fig, "fig13_final_window_success")""")
 
 code(r"""# %% Fig 14 — sample-efficiency: per-seed E80 (points + box) -------------
-data, labels, colors, never = [], [], [], []
+import matplotlib.patches as mpatches
+data, colors, never = [], [], []
 for n in NS:
     for m in ALLMODES:
         vals = []
@@ -797,11 +798,10 @@ for n in NS:
             c = MAIN / "runs" / f"n{n}_{m}_seed{s}" / "episode_summary.csv"
             if c.exists():
                 vals.append(e80(c, n))
-        reached = [v for v in vals if not np.isnan(v)]
-        data.append(reached); labels.append(f"n{n}\n{MODE_LABEL[m][:6]}")
+        data.append([v for v in vals if not np.isnan(v)])
         colors.append(MODE_C[m]); never.append(sum(np.isnan(v) for v in vals))
 
-fig, ax = plt.subplots(figsize=(13, 5))
+fig, ax = plt.subplots(figsize=(11, 5.6))
 pos = np.arange(len(data))
 bp = ax.boxplot(data, positions=pos, widths=0.6, patch_artist=True, showfliers=False)
 for patch, c in zip(bp["boxes"], colors):
@@ -812,9 +812,16 @@ for i, (vals, c, nv) in enumerate(zip(data, colors, never)):
     if nv:
         ax.annotate(f"{nv}× never", (i, ax.get_ylim()[1]*0.96), ha="center",
                     fontsize=9, color="crimson")
-ax.set_xticks(pos); ax.set_xticklabels(labels, fontsize=10)
-ax.set_ylabel("episodes to reach rolling-SR ≥ 80%  (E₈₀, lower=faster)", **CORR)
-ax.set_title("Sample efficiency: per-seed E₈₀ (box + raw seeds)", fontsize=14)
+# group by team size (mode encoded by colour + legend) to avoid crowded tick text
+nmodes = len(ALLMODES)
+for b in range(1, len(NS)):
+    ax.axvline(nmodes * b - 0.5, color="0.85", lw=1, zorder=0)
+ax.set_xticks([nmodes * k + (nmodes - 1) / 2 for k in range(len(NS))])
+ax.set_xticklabels([f"n={n}" for n in NS], **CORR)
+ax.legend(handles=[mpatches.Patch(facecolor=MODE_C[m], alpha=0.4, label=MODE_LABEL[m])
+                   for m in ALLMODES], frameon=False, fontsize=11, title="mode")
+ax.set_ylabel("episodes to reach rolling SR $\\geq$ 80%\n($E_{80}$, lower = faster)", **CORR)
+ax.set_title(r"Sample efficiency: per-seed $E_{80}$ (box + raw seeds)", fontsize=14)
 fig_show(fig, "fig14_sample_efficiency")""")
 
 code(r"""# %% Fig 21 — baseline comparison with raw seed dots --------------------
