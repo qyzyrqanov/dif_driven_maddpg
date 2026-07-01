@@ -27,6 +27,10 @@ __pycache__/
 *.zip
 *.pkl
 
+# ...but keep illustrative images used in the README
+!docs/images/
+!docs/images/*.png
+
 # Training artifacts (large binaries)
 *.pth
 

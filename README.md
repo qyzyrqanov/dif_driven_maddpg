@@ -4,10 +4,16 @@
 [![DOI](https://img.shields.io/badge/DOI-10.3390%2Frobotics15070119-blue.svg)](https://doi.org/10.3390/robotics15070119)
 
 Research codebase for **cooperative coverage of landmarks by small teams of
-differential-drive robots** using multi-agent reinforcement learning. Several
-MADDPG / IDDPG variants train **shared** actor and critic networks against a
-custom [PettingZoo](https://pettingzoo.farama.org/) `ParallelEnv` whose reward is
-shaped by a Hungarian assignment between agents and landmarks.
+differential-drive robots** using multi-agent reinforcement learning. A
+**decentralized shared actor–critic** framework trains a single actor and a
+single critic — reused across all agents — against a custom
+[PettingZoo](https://pettingzoo.farama.org/) `ParallelEnv` in continuous 2D
+simulation. Agents use **permutation-invariant local observations** and
+**continuous differential-drive control**, and the reward is shaped by a stepwise
+**Hungarian assignment** between agents and landmarks, together with collision
+penalties and time-efficiency terms. Several MADDPG / IDDPG variants are provided
+for comparison. Homogeneous teams of **four, five, and six** agents are evaluated
+over multiple independent seeds.
 
 This repository accompanies the paper:
 
@@ -15,6 +21,18 @@ This repository accompanies the paper:
 > *Decentralized Shared Actor–Critic Learning for Collision-Aware Small-Team
 > Multi-Robot Coverage.* **Robotics** 2026, 15(7), 119.
 > https://doi.org/10.3390/robotics15070119
+
+<p align="center">
+  <img src="docs/images/coverage_trajectories.png" alt="Agent trajectories: a team of differential-drive robots covering landmarks while avoiding obstacles" width="49%">
+  <img src="docs/images/learning_curves.png" alt="Learning curves (average return per episode) for teams of 4, 5, and 6 agents" width="49%">
+</p>
+
+<p align="center">
+  <em>Left: learned trajectories of a six-robot team covering assigned landmarks
+  (red ×); grey discs are obstacles, from the obstacle-based experiments of the
+  prior JRC paper. Right: training convergence (average return per episode) across
+  team sizes n = 4, 5, 6 with the per-seed spread shaded.</em>
+</p>
 
 ---
 
