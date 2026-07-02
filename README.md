@@ -96,6 +96,11 @@ export PYTHONPATH=$(pwd)
 python run/train_done4.py            # or any other run/train_*.py
 ```
 
+All output and data locations are configurable via environment variables (no
+machine-specific paths are hardcoded); the repo root is auto-detected. See
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the full list of variables
+and examples.
+
 Restarting a script from the same directory resumes automatically from the last
 saved episode. Validate a run by inspecting the generated
 `learning_curve_episode_*.png`, `actor_loss_episode_*.png`,
@@ -147,15 +152,18 @@ that this code was originally developed for.
 **BibTeX:**
 
 ```bibtex
-@article{robotics15070119,
-  author  = {Kyzyrkanov, Abzal E. and Yedilkhan, Didar and Amirgaliyeva, Saltanat and Narynov, Sergazy},
-  title   = {Decentralized Shared Actor–Critic Learning for Collision-Aware Small-Team Multi-Robot Coverage},
-  journal = {Robotics},
-  year    = {2026},
-  volume  = {15},
-  number  = {7},
-  pages   = {119},
-  doi     = {10.3390/robotics15070119}
+@Article{robotics15070119,
+AUTHOR = {Kyzyrkanov, Abzal E. and Yedilkhan, Didar and Amirgaliyeva, Saltanat and Narynov, Sergazy},
+TITLE = {Decentralized Shared Actor–Critic Learning for Collision-Aware Small-Team Multi-Robot Coverage},
+JOURNAL = {Robotics},
+VOLUME = {15},
+YEAR = {2026},
+NUMBER = {7},
+ARTICLE-NUMBER = {119},
+URL = {https://www.mdpi.com/2218-6581/15/7/119},
+ISSN = {2218-6581},
+ABSTRACT = {This study presents a decentralized shared actor–critic framework for cooperative multi-robot coverage in continuous two-dimensional simulation. The method combines permutation-invariant local observations, continuous differential-drive control, and reward shaping based on stepwise Hungarian assignment distances, collision penalties, and time efficiency. Homogeneous teams of four, five, and six agents are evaluated in an obstacle-free environment using five independent training seeds. In the final training window, the full reward configuration achieved full-team success rates of 98.2 ± 2.9% for four agents, 85.1 ± 18.0% for five agents, and 96.3 ± 2.0% for six agents, with mean landmark coverage above 96% in all cases. The lower mean in the five-agent setting was associated with higher seed-level variability dominated by one low-success seed. Reward ablations without assignment shaping or collision penalties remained viable, and seed-level tests did not show a statistically significant final-window advantage of the full reward configuration. The full configuration reached the 80% rolling-success threshold earlier in median terms, with the clearest seed-level support in the four-agent setting. Within-environment comparison showed higher full-team success than MADDPG and MAPPO under the matched training horizon and final-window protocol. Deterministic arena-size transfer from 15×15 to 30×30 showed decreasing full-team success as arena size increased, while partial landmark coverage remained higher than strict full-team completion. The results support the method for small homogeneous teams in the tested obstacle-free simulation, while larger teams, external obstacles, aerial-robot dynamics, formal safety guarantees, and hardware deployment remain future work.},
+DOI = {10.3390/robotics15070119}
 }
 ```
 
@@ -181,7 +189,8 @@ that this code was originally developed for.
   volume  = {6},
   number  = {6},
   pages   = {3068--3087},
-  doi     = {10.18196/jrc.v6i6.28387}
+  doi     = {10.18196/jrc.v6i6.28387},
+  url     = {https://doi.org/10.18196/jrc.v6i6.28387}
 }
 ```
 

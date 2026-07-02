@@ -66,4 +66,7 @@ revision_logs_maddpg_obs/
 revision_logs_mappo/
 revision_logs_round3/
 *.md
+# ...but keep the public docs (README is at repo root; docs/ holds published docs)
+!README.md
+!docs/*.md
 /res/supplementary/
