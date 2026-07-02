@@ -8,6 +8,7 @@ import torch
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
+LEGACY_LOG_ROOT = os.path.expanduser(os.environ.get("LEGACY_LOG_ROOT", "~/dif_driven_archive"))
 
 from custom_envs.diff_driven.gym_env.centered_paralelenv.env import DiffDriveParallelEnvDone
 from rl.maddpg import IDDPGWithoutS
@@ -17,7 +18,7 @@ N_AGENTS = int(os.environ.get("SWEEP_N", "4"))
 N_EPISODES = 7
 MAX_STEPS = 500
 
-Z7S_LOG = f"/media/abz/Z7S/experiments/3-6/{N_AGENTS}/episode_log.txt"
+Z7S_LOG = f"{LEGACY_LOG_ROOT}/experiments/3-6/{N_AGENTS}/episode_log.txt"
 
 SCALE = [1.0, 1.0, 0.0, 10.0, 10.0, 10.0, 1.0, 1.0, 1.0]
 

@@ -26,10 +26,10 @@
 
 set -euo pipefail
 
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 # MAPPO training artifacts (contain mappo_actor.pth per run).
-CKPT_ROOT="${CKPT_ROOT:-/home/abz/Desktop/dif_driven_revision_mappo_artifacts/runs}"
-OUT_ROOT="${OUT_ROOT:-/home/abz/Desktop/dif_driven_revision_mappo_eval}"
+CKPT_ROOT="${CKPT_ROOT:-$HOME/Desktop/dif_driven_revision_mappo_artifacts/runs}"
+OUT_ROOT="${OUT_ROOT:-$HOME/Desktop/dif_driven_revision_mappo_eval}"
 PARALLEL="${PARALLEL:-3}"
 ENV_SIZES="${ENV_SIZES:-20 25}"
 EVAL_SEED="${EVAL_SEED:-42}"

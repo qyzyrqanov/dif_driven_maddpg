@@ -16,7 +16,7 @@ import hashlib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-RUNS_ROOT = Path("/media/abz/Z7S/experiments_revision_offline_replay_restart_v3/runs")
+RUNS_ROOT = Path.home() / "dif_driven_archive/experiments_revision_offline_replay_restart_v3/runs"
 LIGHT_ROOT = REPO / "revision_logs" / "runs"
 FIGURES_DIR = REPO / "res" / "figures_pdf" / "multiseed_diagnostics"
 STAGE = REPO / "res" / "supplementary" / "_stage"

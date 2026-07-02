@@ -19,16 +19,16 @@
 
 set -euo pipefail
 
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 # Trained actor checkpoints: local copy (gitignored) so eval does NOT need the
 # Z7S drive mounted. Populate/refresh with:
 #   tools/copy_checkpoints_local.sh   (copies shared_actor.pth from the Z7S mirror)
 # Falls back to the Z7S mirror if the local copy is absent.
 CKPT_ROOT="${CKPT_ROOT:-$REPO/checkpoints_local/runs}"
 if [[ ! -d "$CKPT_ROOT" ]]; then
-  CKPT_ROOT="/media/abz/Z7S/experiments_revision_offline_replay_restart_v3/runs"
+  CKPT_ROOT="$HOME/dif_driven_archive/experiments_revision_offline_replay_restart_v3/runs"
 fi
-OUT_ROOT="${OUT_ROOT:-/home/abz/Desktop/dif_driven_revision_eval}"
+OUT_ROOT="${OUT_ROOT:-$HOME/Desktop/dif_driven_revision_eval}"
 PARALLEL="${PARALLEL:-3}"
 ENV_SIZES="${ENV_SIZES:-20 25}"
 EVAL_SEED="${EVAL_SEED:-42}"

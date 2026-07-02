@@ -28,7 +28,7 @@ export MODES="${MODES:-full ablation nocoll}"
 export EPISODES="${EPISODES:-1000}"
 export V_ANG_MAX="${V_ANG_MAX:-pi2}"
 export ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_offline_replay_artifacts_v2}"
-export OFFLOAD_ROOT="${OFFLOAD_ROOT:-/media/abz/Z7S/experiments_revision_offline_replay_v2}"
+export OFFLOAD_ROOT="${OFFLOAD_ROOT:-$HOME/dif_driven_archive/experiments_revision_offline_replay_v2}"
 # Per-episode offload mirror. Set OFFLOAD=0 to disable (e.g., when the
 # external drive is unmounted, or to skip the post-episode sync delay).
 export OFFLOAD="${OFFLOAD:-1}"

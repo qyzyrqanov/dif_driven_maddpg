@@ -12,8 +12,8 @@ SEEDS="${SEEDS:-3 4 5}"
 NS="${NS:-4 5 6}"
 MADDPG_SEEDS="${MADDPG_SEEDS:-4 5}"   # seeds 1-3 already archived separately
 TARGET="${EPISODES:-1000}"
-R3_LOCAL="/home/abz/Desktop/dif_driven_round3_artifacts/runs"
-R3_Z7S="/media/abz/Z7S/dif_driven_round3_artifacts/runs"
+R3_LOCAL="$HOME/Desktop/dif_driven_round3_artifacts/runs"
+R3_Z7S="$HOME/dif_driven_archive/dif_driven_round3_artifacts/runs"
 
 SEEDS="$SEEDS" NS="$NS" MADDPG_SEEDS="$MADDPG_SEEDS" TARGET="$TARGET" \
 R3_LOCAL="$R3_LOCAL" R3_Z7S="$R3_Z7S" python3 - <<'PY'

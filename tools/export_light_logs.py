@@ -8,7 +8,7 @@ Tier split (per the project policy):
     sums, ~50 KB) + `meta.json`/`restart_state.json` + aggregate CSVs + figures +
     the notebook. A few MB total — NO heavy per-step `result*.csv` (150 MB each),
     checkpoints, or replay buffers.
-  * MEDIA  (single folder, e.g. /media/abz/Z7S/dif_driven_logs/) = EVERYTHING
+  * MEDIA  (single folder, e.g. ~/dif_driven_archive/dif_driven_logs/) = EVERYTHING
     local PLUS the bulkier raw episode-wise text logs (`episode_log.txt`,
     `restart_log.txt`). Disaster-recovery copy.
 
@@ -23,6 +23,7 @@ Usage:
     python tools/export_light_logs.py --window 200
 """
 import argparse, glob, json, os, re, shutil, subprocess
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -108,9 +109,9 @@ def run_totals(name, n, summ, meta, restarts, window):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifact_root",
-                    default="/home/abz/Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts")
+                    default=str(Path.home() / "Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts"))
     ap.add_argument("--local_logs", default=os.path.join(REPO, "revision_logs"))
-    ap.add_argument("--media_logs", default="/media/abz/Z7S/dif_driven_logs")
+    ap.add_argument("--media_logs", default=str(Path.home() / "dif_driven_archive/dif_driven_logs"))
     ap.add_argument("--window", type=int, default=200)
     ap.add_argument("--no_media", action="store_true")
     args = ap.parse_args()

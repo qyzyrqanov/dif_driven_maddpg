@@ -57,8 +57,8 @@ MAX_RETRIES="${MAX_RETRIES:-20}"
 RETRY_BACKOFF="${RETRY_BACKOFF:-10}"
 
 # Lean local scratch (fast SSD) vs. external archive (the +1 worker mirrors here).
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/home/abz/Desktop/dif_driven_round3_artifacts}"
-OFFLOAD_ROOT="${OFFLOAD_ROOT:-/media/abz/Z7S/dif_driven_round3_artifacts}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_round3_artifacts}"
+OFFLOAD_ROOT="${OFFLOAD_ROOT:-$HOME/dif_driven_archive/dif_driven_round3_artifacts}"
 OFFLOAD="${OFFLOAD:-1}"
 LOG_DIR="${LOG_DIR:-$ARTIFACT_ROOT/logs}"
 OFFLOAD_QUEUE="${OFFLOAD_QUEUE:-$ARTIFACT_ROOT/.offload_queue}"

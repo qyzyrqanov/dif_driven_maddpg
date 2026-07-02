@@ -46,9 +46,9 @@
 
 set -euo pipefail
 
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/home/abz/Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts}"
-OFFLOAD_ROOT="${OFFLOAD_ROOT:-/media/abz/Z7S/experiments_revision_offline_replay_restart_v3}"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts}"
+OFFLOAD_ROOT="${OFFLOAD_ROOT:-$HOME/dif_driven_archive/experiments_revision_offline_replay_restart_v3}"
 PARALLEL="${PARALLEL:-3}"
 EPISODES=1000
 VANG="pi2"

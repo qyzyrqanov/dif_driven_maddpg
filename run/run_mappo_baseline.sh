@@ -30,8 +30,8 @@
 
 set -euo pipefail
 
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/home/abz/Desktop/dif_driven_revision_mappo_artifacts}"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_mappo_artifacts}"
 PARALLEL="${PARALLEL:-3}"
 SEEDS="${SEEDS:-1 2 3 4 5}"
 NS="${NS:-4 5 6}"

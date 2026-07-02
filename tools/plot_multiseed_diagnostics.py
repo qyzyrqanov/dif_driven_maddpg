@@ -25,7 +25,7 @@ from matplotlib.ticker import MaxNLocator
 
 REPO = Path(__file__).resolve().parent.parent
 RUNS_ROOT_CANDIDATES = [
-    Path("/media/abz/Z7S/experiments_revision_offline_replay_restart_v3/runs"),
+    Path.home() / "dif_driven_archive/experiments_revision_offline_replay_restart_v3/runs",
     REPO / "experiments_revision_offline_replay_restart_v3" / "runs",
 ]
 OUT_DIR = REPO / "res" / "figures_pdf" / "multiseed_diagnostics"

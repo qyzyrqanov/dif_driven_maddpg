@@ -15,6 +15,7 @@ Usage:
     python tools/create_final_notebook.py
 """
 import argparse, json, os
+from pathlib import Path
 
 CELLS = []
 
@@ -717,7 +718,7 @@ Re-run this notebook (Run-All) to regenerate every artifact from the local light
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="/home/abz/Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts")
+    ap.add_argument("--root", default=str(Path.home() / "Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts"))
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

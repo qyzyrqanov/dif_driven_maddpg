@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 DEFAULT_SOURCE_ROOT = Path.home() / "Desktop" / "dif_driven_revision_corrected_artifacts"
-DEFAULT_TARGET_ROOT = Path("/media/abz/Z7S/experiments_revision_corrected")
+DEFAULT_TARGET_ROOT = Path.home() / "dif_driven_archive/experiments_revision_corrected"
 
 # Matches both the original `n4_full_seed1` layout and the round-3 prefixed
 # variants `abl_noRestart_n4_full_seed1`, `abl_noHER_…`, `maddpg_obs_…`.

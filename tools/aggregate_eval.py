@@ -17,7 +17,7 @@ Metrics:
 
 Usage:
   python tools/aggregate_eval.py \
-    --eval_dir /home/abz/Desktop/dif_driven_revision_eval/eval \
+    --eval_dir ~/Desktop/dif_driven_revision_eval/eval \
     --out_dir  revision_logs/eval
 """
 import argparse

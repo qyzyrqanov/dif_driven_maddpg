@@ -1,11 +1,16 @@
-# Save current directory (folder1)
-$cwd = Get-Location
+# Launcher: activate the virtual environment and run the training script.
+# Artifacts (checkpoints, replay buffers, plots, logs, CSVs) are written to the
+# CURRENT working directory, so cd into your desired output folder first.
 
-# Set PYTHONPATH to your project root
-$env:PYTHONPATH = "C:\Users\abzza\PycharmProjects\dif_driven_maddpg"
+# Resolve the project root from this script's own location (run/ -> repo root).
+$RepoRoot = Split-Path -Parent $PSScriptRoot
 
-# Activate the virtual environment
-& "C:\Users\abzza\PycharmProjects\dif_driven_maddpg\.venv3.10\Scripts\Activate.ps1"
+# Put the project root on PYTHONPATH (the code uses absolute package imports).
+$env:PYTHONPATH = $RepoRoot
 
-# Run the script (but keep working directory as $cwd so relative paths work)
-python "C:\Users\abzza\PycharmProjects\dif_driven_maddpg\run\train_done5.py"
+# Activate the virtual environment. Override its location with $env:VENV_DIR.
+$VenvDir = if ($env:VENV_DIR) { $env:VENV_DIR } else { Join-Path $RepoRoot ".venv3.10" }
+& (Join-Path $VenvDir "Scripts\Activate.ps1")
+
+# Run the training script (writes its artifacts into the current directory).
+python (Join-Path $PSScriptRoot "train_done5.py")

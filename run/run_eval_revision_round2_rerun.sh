@@ -20,11 +20,11 @@
 
 set -euo pipefail
 
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 # MAPPO actors (archived to media after pass 1).
-CKPT_ROOT="${CKPT_ROOT:-/media/abz/Z7S/dif_driven_logs_mappo/artifacts_raw/runs}"
+CKPT_ROOT="${CKPT_ROOT:-$HOME/dif_driven_archive/dif_driven_logs_mappo/artifacts_raw/runs}"
 # Eval CSV dir holding the 27 complete jobs (so reruns join them for aggregation).
-OUT_ROOT="${OUT_ROOT:-/media/abz/Z7S/dif_driven_logs_mappo/eval_raw}"
+OUT_ROOT="${OUT_ROOT:-$HOME/dif_driven_archive/dif_driven_logs_mappo/eval_raw}"
 PARALLEL="${PARALLEL:-3}"
 EVAL_SEED="${EVAL_SEED:-42}"
 EPISODES="${EPISODES:-200}"

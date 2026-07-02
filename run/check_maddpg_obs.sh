@@ -12,8 +12,8 @@
 #        ARTIFACT_ROOT=... WINDOW=100 bash run/check_maddpg_obs.sh
 
 set -euo pipefail
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/home/abz/Desktop/dif_driven_revision_maddpg_obs_artifacts}"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_maddpg_obs_artifacts}"
 WINDOW="${WINDOW:-100}"
 PY="$REPO/.venvLin/bin/python"
 [[ -x "$PY" ]] || PY="python"

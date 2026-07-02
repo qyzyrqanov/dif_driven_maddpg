@@ -59,7 +59,7 @@
 
 set -euo pipefail
 
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 PHASE="${PHASE:-all}"               # all | train | ablation | maddpg | eval
 PARALLEL="${PARALLEL:-3}"
 SEEDS="${SEEDS:-1 2 3 4 5}"
@@ -68,15 +68,15 @@ VANG="pi2"
 MODE="full"
 
 # training
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/home/abz/Desktop/dif_driven_round3_artifacts}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_round3_artifacts}"
 EPISODES=1000
 MAX_RETRIES="${MAX_RETRIES:-20}"
 RETRY_BACKOFF="${RETRY_BACKOFF:-10}"
 
 # eval (#13 transfer)
 CKPT_ROOT="${CKPT_ROOT:-$REPO/checkpoints_local/runs}"
-[[ -d "$CKPT_ROOT" ]] || CKPT_ROOT="/media/abz/Z7S/experiments_revision_offline_replay_restart_v3/runs"
-EVAL_OUT_ROOT="${EVAL_OUT_ROOT:-/home/abz/Desktop/dif_driven_round3_eval}"
+[[ -d "$CKPT_ROOT" ]] || CKPT_ROOT="$HOME/dif_driven_archive/experiments_revision_offline_replay_restart_v3/runs"
+EVAL_OUT_ROOT="${EVAL_OUT_ROOT:-$HOME/Desktop/dif_driven_round3_eval}"
 ENV_SIZES="${ENV_SIZES:-15 18 20 25 30}"
 EVAL_SEED="${EVAL_SEED:-42}"
 EVAL_EPISODES="${EVAL_EPISODES:-200}"

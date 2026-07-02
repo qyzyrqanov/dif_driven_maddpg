@@ -463,7 +463,7 @@ for p in sorted(FIG.glob("*.pdf")):
     print("  ", p.name)""")
 
 md(r"""**Provenance.** Ours = `revision_logs/` (45-run sweep + eval). MAPPO =
-`revision_logs_mappo/` (raw archived on media `/media/abz/Z7S/dif_driven_logs_mappo/`).
+`revision_logs_mappo/` (raw archived on media `~/dif_driven_archive/dif_driven_logs_mappo/`).
 MADDPG numbers are frozen constants from `revision_logs_maddpg_obs/run_details.csv`.
 c-sweep from `.ai/CONTEXT/data/sweep_coll_c_summary.json`. Training-window SR
 includes exploration noise (disclosed); deterministic eval is reported separately.

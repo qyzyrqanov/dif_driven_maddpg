@@ -7,6 +7,7 @@ import torch
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
+LEGACY_LOG_ROOT = os.path.expanduser(os.environ.get("LEGACY_LOG_ROOT", "~/dif_driven_archive"))
 from custom_envs.diff_driven.gym_env.centered_paralelenv.env import DiffDriveParallelEnvDone
 from rl.maddpg import IDDPGWithoutS
 
@@ -112,7 +113,7 @@ def run(n, env_cls, workdir):
 def main():
     summary = {}
     for n in (4, 5, 6):
-        z7s = parse_components(f"/media/abz/Z7S/experiments/3-6/{n}/episode_log.txt")[:N_EPS]
+        z7s = parse_components(f"{LEGACY_LOG_ROOT}/experiments/3-6/{n}/episode_log.txt")[:N_EPS]
         z_stack = np.stack([z7s[e].mean(axis=0) for e in range(N_EPS)])
         z_coll4 = z_stack[:, 4]; z_coll5 = z_stack[:, 5]
         z_score = (z_stack * SCALE).sum(axis=1).mean()
