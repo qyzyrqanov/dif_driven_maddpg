@@ -26,11 +26,13 @@ from rl.maddpg import (  # noqa: E402
     MADDPGSharedActorCritic,
     MADDPGSharedActorCriticIndependentObs,
 )
+from rl.mappo import MAPPO  # noqa: E402
 
 ALGORITHMS = {
     "iddpg_without_s": IDDPGWithoutS,        # canonical: shared decentralized critic (obs_i, action_i)
     "maddpg": MADDPGSharedActorCritic,       # Lowe-2017-style: joint-action centralized critic
     "maddpg_obs": MADDPGSharedActorCriticIndependentObs,  # CTDE: per-agent reward + concat-obs critic (fixes A/B/C)
+    "mappo": MAPPO,                          # on-policy CTDE baseline (R2-round2 #3); own loop, no replay
 }
 from tools.offload_artifacts import ensure_target_root, offload_run_dir  # noqa: E402
 

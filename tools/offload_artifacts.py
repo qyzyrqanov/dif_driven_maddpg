@@ -22,9 +22,14 @@ from pathlib import Path
 
 
 DEFAULT_SOURCE_ROOT = Path.home() / "Desktop" / "dif_driven_revision_corrected_artifacts"
-DEFAULT_TARGET_ROOT = Path("/media/abz/Z7S/experiments_revision_corrected")
+DEFAULT_TARGET_ROOT = Path.home() / "dif_driven_archive/experiments_revision_corrected"
 
-RUN_RE = re.compile(r"^n(?P<n>[456])_(?P<mode>full|ablation|nocoll)_seed(?P<seed>\d+)$")
+# Matches both the original `n4_full_seed1` layout and the round-3 prefixed
+# variants `abl_noRestart_n4_full_seed1`, `abl_noHER_…`, `maddpg_obs_…`.
+RUN_RE = re.compile(
+    r"^(?:abl_noRestart_|abl_noHER_|maddpg_obs_)?"
+    r"n(?P<n>[456])_(?P<mode>full|ablation|nocoll)_seed(?P<seed>\d+)$"
+)
 RESULT_SUFFIX = {"full": "", "ablation": "_ablation", "nocoll": "_nocoll"}
 
 COMPLETED_KEEP_NAMES = {

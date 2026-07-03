@@ -20,12 +20,12 @@
 # PILOT FIRST (recommended): run one seed at n=4 to confirm MADDPG trains here
 # and to measure wall-clock, before launching all 9:
 #
-#   cd /home/abz/workspace/PycharmProjects/dif_driven_maddpg
+#   cd $REPO
 #   source .venvLin/bin/activate && export PYTHONPATH=$(pwd)
 #   python run/train_seeded.py --algorithm maddpg --n 4 --mode full --seed 1 \
 #     --episodes 1000 --v_ang_max pi2 --use_offline_replay \
 #     --disable_episode_offload \
-#     --out_dir /home/abz/Desktop/dif_driven_revision_maddpg_artifacts/runs/maddpg_n4_full_seed1
+#     --out_dir $HOME/Desktop/dif_driven_revision_maddpg_artifacts/runs/maddpg_n4_full_seed1
 #
 # FULL RUN:
 #   CONFIRM=1 bash run/run_maddpg_baseline.sh
@@ -34,8 +34,8 @@
 
 set -euo pipefail
 
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/home/abz/Desktop/dif_driven_revision_maddpg_artifacts}"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_maddpg_artifacts}"
 PARALLEL="${PARALLEL:-5}"
 SEEDS="${SEEDS:-1 2 3}"
 NS="${NS:-4 5 6}"

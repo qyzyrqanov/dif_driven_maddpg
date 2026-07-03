@@ -1,2 +1,5 @@
-source /home/abz/PycharmProjects/dif_driven_maddpg/.venv/bin/activate
-python /home/abz/PycharmProjects/dif_driven_maddpg/run/train_done5_ablation.py
+#!/usr/bin/env bash
+# Repo root is auto-detected from this script's location; override by exporting REPO.
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+source "$REPO/.venv/bin/activate"
+python "$REPO/run/train_done5_ablation.py"

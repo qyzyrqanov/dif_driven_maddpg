@@ -8,7 +8,7 @@ Tier split (per the project policy):
     sums, ~50 KB) + `meta.json`/`restart_state.json` + aggregate CSVs + figures +
     the notebook. A few MB total — NO heavy per-step `result*.csv` (150 MB each),
     checkpoints, or replay buffers.
-  * MEDIA  (single folder, e.g. /media/abz/Z7S/dif_driven_logs/) = EVERYTHING
+  * MEDIA  (single folder, e.g. ~/dif_driven_archive/dif_driven_logs/) = EVERYTHING
     local PLUS the bulkier raw episode-wise text logs (`episode_log.txt`,
     `restart_log.txt`). Disaster-recovery copy.
 
@@ -22,13 +22,17 @@ Usage:
     python tools/export_light_logs.py --no_media       # local totals only
     python tools/export_light_logs.py --window 200
 """
-import argparse, glob, json, os, shutil, subprocess
+import argparse, glob, json, os, re, shutil, subprocess
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_META_FILES = ["meta.json", "restart_state.json"]          # per-run totals -> local + media
 EPISODEWISE_FILES = ["episode_log.txt", "restart_log.txt"]    # episode-wise -> media only
+# Matches both main-sweep dirs (`n4_full_seed1`) and prefixed baselines
+# (`maddpg_obs_n4_full_seed1`): captures n, mode, seed regardless of prefix.
+RUN_NAME_RE = re.compile(r"n(\d+)_([A-Za-z0-9]+)_seed(\d+)")
 
 
 def num_agents(run_dir, name):
@@ -39,7 +43,7 @@ def num_agents(run_dir, name):
             return int(m.get("num_agents") or m.get("n"))
         except Exception:
             pass
-    return int(name[1:name.index("_")])
+    return int(RUN_NAME_RE.search(name).group(1))
 
 
 def _from_episode_log(run_dir):
@@ -83,8 +87,8 @@ def distil_run(run_dir, n):
 
 def run_totals(name, n, summ, meta, restarts, window):
     """One-row dict of per-run totals from the episode summary + meta."""
-    parts = name.split("_")
-    mode, seed = parts[1], int(parts[2].replace("seed", ""))
+    m = RUN_NAME_RE.search(name)
+    mode, seed = m.group(2), int(m.group(3))
     row = dict(run=name, n=n, mode=mode, seed=seed)
     if summ is not None and len(summ):
         last = summ.tail(window)
@@ -105,9 +109,9 @@ def run_totals(name, n, summ, meta, restarts, window):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifact_root",
-                    default="/home/abz/Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts")
+                    default=str(Path.home() / "Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts"))
     ap.add_argument("--local_logs", default=os.path.join(REPO, "revision_logs"))
-    ap.add_argument("--media_logs", default="/media/abz/Z7S/dif_driven_logs")
+    ap.add_argument("--media_logs", default=str(Path.home() / "dif_driven_archive/dif_driven_logs"))
     ap.add_argument("--window", type=int, default=200)
     ap.add_argument("--no_media", action="store_true")
     args = ap.parse_args()
@@ -122,7 +126,7 @@ def main():
     os.makedirs(media_stage, exist_ok=True)
 
     names = sorted(d for d in os.listdir(runs_root)
-                   if os.path.isdir(os.path.join(runs_root, d)) and d.startswith("n"))
+                   if os.path.isdir(os.path.join(runs_root, d)) and RUN_NAME_RE.search(d))
     totals = []
     for name in names:
         rd = os.path.join(runs_root, name)

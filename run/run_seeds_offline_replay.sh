@@ -20,7 +20,7 @@
 #   NS             (default "4 5 6")
 #   EPISODES       (default 1000)
 #   ARTIFACT_ROOT  (default ~/Desktop/dif_driven_revision_offline_replay_artifacts)
-#   OFFLOAD_ROOT   (default /media/abz/Z7S/experiments_revision_offline_replay)
+#   OFFLOAD_ROOT   (default $HOME/dif_driven_archive/experiments_revision_offline_replay)
 #   V_ANG_MAX      (default pi2)
 #   LOG_DIR        (default $ARTIFACT_ROOT/logs)
 #   OFFLOAD_MODE   (default end)     end | every | every_k
@@ -39,7 +39,7 @@ MODES="${MODES:-full ablation nocoll}"
 NS="${NS:-4 5 6}"
 EPISODES="${EPISODES:-1000}"
 ARTIFACT_ROOT="${ARTIFACT_ROOT:-$HOME/Desktop/dif_driven_revision_offline_replay_artifacts}"
-OFFLOAD_ROOT="${OFFLOAD_ROOT:-/media/abz/Z7S/experiments_revision_offline_replay}"
+OFFLOAD_ROOT="${OFFLOAD_ROOT:-$HOME/dif_driven_archive/experiments_revision_offline_replay}"
 V_ANG_MAX="${V_ANG_MAX:-pi2}"
 OFFLOAD="${OFFLOAD:-1}"  # 1 = mirror to OFFLOAD_ROOT, 0 = disable
 OFFLOAD_MODE="${OFFLOAD_MODE:-end}"   # end | every | every_k — when to mirror to USB

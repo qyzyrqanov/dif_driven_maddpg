@@ -12,6 +12,7 @@ Success rate here is the *training-window* SR (exploration noise on), matching t
 metric used throughout the restart-v3 notes. Use --window to change the window.
 """
 import argparse, csv, glob, json, os, statistics, sys
+from pathlib import Path
 
 MODES = ["full", "ablation", "nocoll"]
 NS = [4, 5, 6]
@@ -59,7 +60,7 @@ def restart_count(run_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="/home/abz/Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts")
+    ap.add_argument("--root", default=str(Path.home() / "Desktop/dif_driven_revision_offline_replay_restart_v3_artifacts"))
     ap.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     ap.add_argument("--window", type=int, default=200)
     ap.add_argument("--out_dir", default=None, help="where to write CSVs (default <root>/res)")

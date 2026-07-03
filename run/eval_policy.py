@@ -26,6 +26,7 @@ from custom_envs.diff_driven.gym_env.centered_paralelenv.env import (  # noqa: E
     DiffDriveParallelEnvDone,
 )
 from models.simpleactor import SimpleActor  # noqa: E402
+from models.mappo_nets import GaussianActor  # noqa: E402
 
 
 SCALES = {
@@ -43,6 +44,13 @@ def parse_args() -> argparse.Namespace:
         description="Evaluate a saved SimpleActor checkpoint."
     )
     parser.add_argument("--actor_ckpt", type=Path, required=True)
+    parser.add_argument(
+        "--algorithm",
+        choices=["iddpg", "mappo"],
+        default="iddpg",
+        help="iddpg = deterministic SimpleActor (canonical / maddpg_obs); "
+        "mappo = GaussianActor (deterministic = distribution mean).",
+    )
     parser.add_argument("--n", type=int, choices=[4, 5, 6], required=True)
     parser.add_argument("--env_size", type=float, default=20.0)
     parser.add_argument("--num_obstacles", type=int, default=0)
@@ -92,7 +100,17 @@ def build_env(
     )
 
 
-def load_actor(actor_ckpt: Path, env: DiffDriveParallelEnvDone) -> SimpleActor:
+def load_actor(actor_ckpt: Path, env: DiffDriveParallelEnvDone, algorithm: str = "iddpg"):
+    if algorithm == "mappo":
+        actor = GaussianActor(
+            env.obs_dim,
+            env.action_dim,
+            device=device,
+            chckpnt_file=str(actor_ckpt),
+        )
+        actor.load_checkpoint(filepath=str(actor_ckpt), raise_on_no_file=True)
+        actor.eval()
+        return actor
     actor = SimpleActor(
         env.obs_dim,
         env.action_dim,
@@ -104,7 +122,17 @@ def load_actor(actor_ckpt: Path, env: DiffDriveParallelEnvDone) -> SimpleActor:
     return actor
 
 
-def make_actor_policy(actor: SimpleActor) -> PolicyFn:
+def make_actor_policy(actor, algorithm: str = "iddpg") -> PolicyFn:
+    if algorithm == "mappo":
+        max_a = float(getattr(actor, "max_action", 1.0))
+
+        def policy(obs: torch.Tensor, env: DiffDriveParallelEnvDone, episode: int, step: int) -> torch.Tensor:
+            del env, episode, step
+            raw, _ = actor.act(obs, deterministic=True)  # deterministic = dist mean
+            return raw.clamp(-max_a, max_a)
+
+        return policy
+
     def policy(obs: torch.Tensor, env: DiffDriveParallelEnvDone, episode: int, step: int) -> torch.Tensor:
         del env, episode, step
         return actor.choose_action(obs, use_noise=False, eval_mode=True)
@@ -311,6 +339,7 @@ def summarize(rows: list[dict], args: argparse.Namespace, wall_seconds: float) -
     returns = [float(row["episode_return"]) for row in rows]
     return {
         "actor_ckpt": str(args.actor_ckpt),
+        "algorithm": args.algorithm,
         "n": args.n,
         "env_size": args.env_size,
         "num_obstacles": args.num_obstacles,
@@ -348,12 +377,12 @@ def main() -> None:
         num_obstacles=args.num_obstacles,
         v_ang_max=args.v_ang_max,
     )
-    actor = load_actor(args.actor_ckpt, env)
+    actor = load_actor(args.actor_ckpt, env, args.algorithm)
 
     start = time.time()
     rows = evaluate_policy(
         env=env,
-        policy=make_actor_policy(actor),
+        policy=make_actor_policy(actor, args.algorithm),
         episodes=args.episodes,
         seed=args.seed,
         reward_scales=SCALES[args.mode],

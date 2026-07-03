@@ -6,8 +6,8 @@
 # Usage:  bash tools/copy_checkpoints_local.sh
 # Override source: SRC=/path/to/runs bash tools/copy_checkpoints_local.sh
 set -euo pipefail
-REPO="/home/abz/workspace/PycharmProjects/dif_driven_maddpg"
-SRC="${SRC:-/media/abz/Z7S/experiments_revision_offline_replay_restart_v3/runs}"
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+SRC="${SRC:-$HOME/dif_driven_archive/experiments_revision_offline_replay_restart_v3/runs}"
 DEST="$REPO/checkpoints_local/runs"
 [[ -d "$SRC" ]] || { echo "source not found (Z7S mounted?): $SRC"; exit 1; }
 n=0

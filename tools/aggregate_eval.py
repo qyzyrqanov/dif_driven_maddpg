@@ -17,7 +17,7 @@ Metrics:
 
 Usage:
   python tools/aggregate_eval.py \
-    --eval_dir /home/abz/Desktop/dif_driven_revision_eval/eval \
+    --eval_dir ~/Desktop/dif_driven_revision_eval/eval \
     --out_dir  revision_logs/eval
 """
 import argparse
@@ -30,6 +30,7 @@ import pandas as pd
 
 POLICY_RE = re.compile(r"policy_n(\d+)_(\w+?)_trainseed(\d+)_env(\d+)_")
 HEUR_RE = re.compile(r"heuristic_n(\d+)_(\w+?)_env(\d+)_")
+MAPPO_RE = re.compile(r"mappo_n(\d+)_(\w+?)_trainseed(\d+)_env(\d+)_")
 
 
 def _episode_rows(path, kind, n, mode, seed, env):
@@ -51,6 +52,16 @@ def collect(eval_dir):
     for f in sorted(glob.glob(os.path.join(eval_dir, "*.csv"))):
         base = os.path.basename(f)
         if base.endswith("_steps.csv"):
+            continue
+        m = MAPPO_RE.match(base)
+        if m:
+            # A completed eval writes its summary .json last; skip CSVs without a
+            # sibling .json (interrupted / partial runs) so they don't bias means.
+            if not os.path.exists(f[:-4] + ".json"):
+                print(f"skip (no sibling .json, incomplete): {base}")
+                continue
+            n, mode, seed, env = int(m[1]), m[2], int(m[3]), int(m[4])
+            rows.append(_episode_rows(f, "mappo", n, mode, seed, env))
             continue
         m = POLICY_RE.match(base)
         if m:

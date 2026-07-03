@@ -27,6 +27,10 @@ __pycache__/
 *.zip
 *.pkl
 
+# ...but keep illustrative images used in the README
+!docs/images/
+!docs/images/*.png
+
 # Training artifacts (large binaries)
 *.pth
 
@@ -58,3 +62,11 @@ revision_logs/
 nohup.out
 checkpoints_local/
 *_run.log
+revision_logs_maddpg_obs/
+revision_logs_mappo/
+revision_logs_round3/
+*.md
+# ...but keep the public docs (README is at repo root; docs/ holds published docs)
+!README.md
+!docs/*.md
+/res/supplementary/

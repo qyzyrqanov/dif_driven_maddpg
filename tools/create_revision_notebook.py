@@ -33,7 +33,7 @@ def main() -> None:
                 # Revision Phase 3 Results
 
                 This notebook aggregates the completed revision batch under
-                `/home/abz/Desktop/dif_driven_revision_corrected_artifacts`.
+                `~/Desktop/dif_driven_revision_corrected_artifacts`.
 
                 It intentionally starts with a training-completeness audit. Do not use the
                 paper-facing summary tables until every intended training run is marked
@@ -57,7 +57,7 @@ def main() -> None:
 
                 from tools.aggregate_revision_results import run_all
 
-                ARTIFACT_ROOT = Path("/home/abz/Desktop/dif_driven_revision_corrected_artifacts")
+                ARTIFACT_ROOT = Path.home() / "Desktop/dif_driven_revision_corrected_artifacts"
                 OUT_DIR = ARTIFACT_ROOT / "res"
                 """
             ),
@@ -66,7 +66,7 @@ def main() -> None:
                 ## Regenerate Aggregates
 
                 This cell writes the Phase 3 CSVs and figures into
-                `/home/abz/Desktop/dif_driven_revision_corrected_artifacts/res`.
+                `~/Desktop/dif_driven_revision_corrected_artifacts/res`.
                 """
             ),
             code(
